@@ -2074,6 +2074,91 @@ function Modules.CommandList:Toggle()
         end)
     end
 end
+local TweenService = game:GetService("TweenService")
+local RunService   = game:GetService("RunService")
+local function RainbowOutline(frame, thickness, speed, recolorText)
+    thickness = thickness or 2
+    speed     = speed     or 1
+    local stroke = Instance.new("UIStroke", frame)
+    stroke.Thickness     = thickness
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    local hue = 0
+    local conn = RunService.Heartbeat:Connect(function(dt)
+        hue = (hue + dt * speed * 0.2) % 1
+        local color = Color3.fromHSV(hue, 1, 1)
+        stroke.Color = color
+        if recolorText then
+            for _, v in ipairs(frame:GetDescendants()) do
+                if v:IsA("TextLabel") or v:IsA("TextButton") or v:IsA("TextBox") then
+                    v.TextColor3 = color
+                end
+            end
+        end
+    end)
+    stroke.AncestryChanged:Connect(function()
+        if not stroke.Parent then conn:Disconnect() end
+    end)
+    return stroke, conn
+end
+local function PulseOutline(frame, color, thickness, speed)
+    color     = color     or Color3.fromRGB(0, 200, 255)
+    thickness = thickness or 2
+    speed     = speed     or 1.5
+    local stroke = Instance.new("UIStroke", frame)
+    stroke.Color     = color
+    stroke.Thickness = thickness
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    local function pulse()
+        TweenService:Create(stroke, TweenInfo.new(speed * 0.5, Enum.EasingStyle.Sine), {
+            Thickness = thickness * 3,
+            Transparency = 0.6,
+        }):Play()
+        task.wait(speed * 0.5)
+        TweenService:Create(stroke, TweenInfo.new(speed * 0.5, Enum.EasingStyle.Sine), {
+            Thickness = thickness,
+            Transparency = 0,
+        }):Play()
+        task.wait(speed * 0.5)
+    end
+    local running = true
+    local thread  = task.spawn(function()
+        while running do pulse() end
+    end)
+    stroke.AncestryChanged:Connect(function()
+        if not stroke.Parent then running = false end
+    end)
+    return stroke
+end
+local function GlowOutline(frame, color, thickness)
+    color     = color     or Color3.fromRGB(200, 0, 255)
+    thickness = thickness or 3
+    local glow = Instance.new("UIStroke", frame)
+    glow.Color        = color
+    glow.Thickness    = thickness * 3
+    glow.Transparency = 0.7
+    glow.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    local inner = Instance.new("UIStroke", frame)
+    inner.Color        = color
+    inner.Thickness    = thickness
+    inner.Transparency = 0
+    inner.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    local function glowPulse()
+        TweenService:Create(glow, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+            Transparency = 0.4,
+        }):Play()
+        task.wait(1.2)
+        TweenService:Create(glow, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+            Transparency = 0.8,
+        }):Play()
+        task.wait(1.2)
+    end
+    local running = true
+    task.spawn(function() while running do glowPulse() end end)
+    glow.AncestryChanged:Connect(function()
+        if not glow.Parent then running = false end
+    end)
+    return inner, glow
+end
 Modules.CommandBar = {
     State = {
         UI = nil,
@@ -4407,7 +4492,7 @@ function Modules.Fling:Initialize()
     end
     RegisterCommand({
         Name = "ffling",
-        Aliases = {"fff"},
+        Aliases = {"ff"},
         Description = "Flings a target player using physics manipulation."
     }, function(args)
         local targetName = args[1] or ""
@@ -5107,48 +5192,85 @@ if not Modules.SetSpawnPoint.State.CharacterAddedConnection then
 end)
 end
 end)
-Modules.NoclipStabilizer = {
-State = {
-Enabled = false,
-Connection = nil
+Modules.AntiRubberband = {
+    State = {
+        IsEnabled    = false,
+        Connections  = {},
+        LastClientPos = nil,
+    },
+    Config = {
+        CorrectionThreshold = 12,
+        SimRadius           = math.huge,
+    },
 }
-}
-function Modules.NoclipStabilizer:_OnStepped()
-    local character = Players.LocalPlayer and Players.LocalPlayer.Character
-    local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-    if rootPart then
-        rootPart.Velocity = Vector3.new(0, 0, 0)
-        rootPart.RotVelocity = Vector3.new(0, 0, 0)
-    end
-end
-function Modules.NoclipStabilizer:Enable()
-    if self.State.Enabled then return end
-        self.State.Enabled = true
-        self.State.Connection = RunService.Stepped:Connect(function()
-        self:_OnStepped()
+function Modules.AntiRubberband:_assertOwnership()
+    pcall(function()
+        sethiddenproperty(LocalPlayer, "SimulationRadius", self.Config.SimRadius)
     end)
-    DoNotif("Noclip Stabilizer: [Enabled]", 3)
+    LocalPlayer.ReplicationFocus = game:GetService("Workspace")
 end
-function Modules.NoclipStabilizer:Disable()
-    if not self.State.Enabled then return end
-        self.State.Enabled = false
-        if self.State.Connection then
-            self.State.Connection:Disconnect()
-            self.State.Connection = nil
+function Modules.AntiRubberband:Enable()
+    if self.State.IsEnabled then return end
+    self.State.IsEnabled = true
+    self.State.Connections.Ownership = RunService.Heartbeat:Connect(function()
+        self:_assertOwnership()
+    end)
+    self.State.Connections.Render = RunService.RenderStepped:Connect(function()
+        local char = LocalPlayer.Character
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local current = hrp.CFrame
+        if self.State.LastClientPos then
+            local delta = (current.Position - self.State.LastClientPos.Position).Magnitude
+            if delta > self.Config.CorrectionThreshold then
+                pcall(function()
+                    hrp.CFrame = self.State.LastClientPos
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                end)
+                return
+            end
         end
-        DoNotif("Noclip Stabilizer: [Disabled]", 3)
-    end
-    RegisterCommand({
-    Name = "antirubberband",
-    Aliases = {"antirb", "arb"},
-    Description = "Toggles the Noclip Stabilizer to prevent server-side rubberbanding."
-    }, function(args)
-    if Modules.NoclipStabilizer.State.Enabled then
-        Modules.NoclipStabilizer:Disable()
-    else
-    Modules.NoclipStabilizer:Enable()
+        self.State.LastClientPos = current
+    end)
+    self.State.Connections.CharAdded = LocalPlayer.CharacterAdded:Connect(function()
+        self.State.LastClientPos = nil
+    end)
+    DoNotif("Anti-Rubberband: ENABLED", 2)
 end
-end)
+function Modules.AntiRubberband:Disable()
+    if not self.State.IsEnabled then return end
+    self.State.IsEnabled  = false
+    self.State.LastClientPos = nil
+    for _, conn in pairs(self.State.Connections) do
+        if conn then conn:Disconnect() end
+    end
+    self.State.Connections = {}
+    DoNotif("Anti-Rubberband: DISABLED", 2)
+end
+function Modules.AntiRubberband:Toggle()
+    if self.State.IsEnabled then self:Disable() else self:Enable() end
+end
+function Modules.AntiRubberband:SetThreshold(n)
+    self.Config.CorrectionThreshold = tonumber(n) or 12
+    DoNotif(("Correction threshold: %d studs"):format(self.Config.CorrectionThreshold), 2)
+end
+function Modules.AntiRubberband:Initialize()
+    local module = self
+    RegisterCommand({
+        Name        = "antirb",
+        Aliases     = {"norubber", "antirubberbrand"},
+        Description = "Blocks server position corrections (rubberband) at all times.",
+    }, function()
+        module:Toggle()
+    end)
+    RegisterCommand({
+        Name        = "rbthreshold",
+        Aliases     = {"rbdist"},
+        Description = "Set how many studs counts as a server correction. Default: 12",
+    }, function(args)
+        module:SetThreshold(args[1])
+    end)
+end
 Modules.NetCommander = {
     State = {
         PinnedRemote = nil,
@@ -15030,741 +15152,7 @@ end
                 DoNotif("Rapid Fire: ENABLED", 2)
             end
         end
-    end)
-Modules.ModuleExplorer = {
-    State = {
-        IsOpen = false,
-        SelectedModule = nil,
-        SelectedPath = {},
-        GUI = nil,
-        Hooks = {},
-        GhostIndexes = {}
-    }
-}
-local TweenService = game:GetService("TweenService")
-local CoreGui = game:GetService("CoreGui")
-local function CreateGUI()
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "ModuleExplorer"
-    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    gui.ResetOnSpawn = false
-    gui.Parent = CoreGui
-    local main = Instance.new("Frame")
-    main.Name = "MainFrame"
-    main.Size = UDim2.fromOffset(1100, 650)
-    main.Position = UDim2.fromScale(0.5, 0.5)
-    main.AnchorPoint = Vector2.new(0.5, 0.5)
-    main.BackgroundColor3 = Color3.fromRGB(10, 10, 15)
-    main.BorderSizePixel = 0
-    main.ClipsDescendants = true
-    main.Parent = gui
-    local mainCorner = Instance.new("UICorner", main)
-    mainCorner.CornerRadius = UDim.new(0, 12)
-    local mainStroke = Instance.new("UIStroke", main)
-    mainStroke.Color = Color3.fromRGB(0, 255, 150)
-    mainStroke.Thickness = 2
-    local titleBar = Instance.new("Frame")
-    titleBar.Name = "TitleBar"
-    titleBar.Size = UDim2.new(1, 0, 0, 40)
-    titleBar.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-    titleBar.BorderSizePixel = 0
-    titleBar.Parent = main
-    local titleCorner = Instance.new("UICorner", titleBar)
-    titleCorner.CornerRadius = UDim.new(0, 12)
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -100, 1, 0)
-    title.Position = UDim2.fromOffset(15, 0)
-    title.BackgroundTransparency = 1
-    title.Font = Enum.Font.Code
-    title.Text = "▸ MODULE EXPLORER v2.0"
-    title.TextColor3 = Color3.fromRGB(0, 255, 150)
-    title.TextSize = 16
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Parent = titleBar
-    local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.fromOffset(30, 30)
-    closeBtn.Position = UDim2.new(1, -35, 0, 5)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(255, 50, 100)
-    closeBtn.BorderSizePixel = 0
-    closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.Text = "×"
-    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    closeBtn.TextSize = 20
-    closeBtn.Parent = titleBar
-    local closeBtnCorner = Instance.new("UICorner", closeBtn)
-    closeBtnCorner.CornerRadius = UDim.new(0, 8)
-    local leftPanel = Instance.new("Frame")
-    leftPanel.Name = "ModuleList"
-    leftPanel.Size = UDim2.new(0.25, -5, 1, -50)
-    leftPanel.Position = UDim2.fromOffset(5, 45)
-    leftPanel.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-    leftPanel.BorderSizePixel = 0
-    leftPanel.Parent = main
-    local leftCorner = Instance.new("UICorner", leftPanel)
-    leftCorner.CornerRadius = UDim.new(0, 8)
-    local leftStroke = Instance.new("UIStroke", leftPanel)
-    leftStroke.Color = Color3.fromRGB(0, 255, 150)
-    leftStroke.Thickness = 1
-    leftStroke.Transparency = 0.5
-    local moduleScroll = Instance.new("ScrollingFrame")
-    moduleScroll.Name = "ModuleScroll"
-    moduleScroll.Size = UDim2.new(1, -10, 1, -10)
-    moduleScroll.Position = UDim2.fromOffset(5, 5)
-    moduleScroll.BackgroundTransparency = 1
-    moduleScroll.BorderSizePixel = 0
-    moduleScroll.ScrollBarThickness = 4
-    moduleScroll.ScrollBarImageColor3 = Color3.fromRGB(0, 255, 150)
-    moduleScroll.CanvasSize = UDim2.fromOffset(0, 0)
-    moduleScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    moduleScroll.Parent = leftPanel
-    local moduleLayout = Instance.new("UIListLayout", moduleScroll)
-    moduleLayout.Padding = UDim.new(0, 5)
-    moduleLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    local middlePanel = Instance.new("Frame")
-    middlePanel.Name = "DetailsPanel"
-    middlePanel.Size = UDim2.new(0.45, -5, 1, -50)
-    middlePanel.Position = UDim2.new(0.25, 5, 0, 45)
-    middlePanel.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-    middlePanel.BorderSizePixel = 0
-    middlePanel.Parent = main
-    local middleCorner = Instance.new("UICorner", middlePanel)
-    middleCorner.CornerRadius = UDim.new(0, 8)
-    local middleStroke = Instance.new("UIStroke", middlePanel)
-    middleStroke.Color = Color3.fromRGB(0, 255, 150)
-    middleStroke.Thickness = 1
-    middleStroke.Transparency = 0.5
-    local detailsScroll = Instance.new("ScrollingFrame")
-    detailsScroll.Name = "DetailsScroll"
-    detailsScroll.Size = UDim2.new(1, -10, 1, -10)
-    detailsScroll.Position = UDim2.fromOffset(5, 5)
-    detailsScroll.BackgroundTransparency = 1
-    detailsScroll.BorderSizePixel = 0
-    detailsScroll.ScrollBarThickness = 4
-    detailsScroll.ScrollBarImageColor3 = Color3.fromRGB(0, 255, 150)
-    detailsScroll.CanvasSize = UDim2.fromOffset(0, 0)
-    detailsScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    detailsScroll.Parent = middlePanel
-    local detailsLayout = Instance.new("UIListLayout", detailsScroll)
-    detailsLayout.Padding = UDim.new(0, 5)
-    detailsLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    local rightPanel = Instance.new("Frame")
-    rightPanel.Name = "ActionsPanel"
-    rightPanel.Size = UDim2.new(0.3, -10, 1, -50)
-    rightPanel.Position = UDim2.new(0.7, 5, 0, 45)
-    rightPanel.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-    rightPanel.BorderSizePixel = 0
-    rightPanel.Parent = main
-    local rightCorner = Instance.new("UICorner", rightPanel)
-    rightCorner.CornerRadius = UDim.new(0, 8)
-    local rightStroke = Instance.new("UIStroke", rightPanel)
-    rightStroke.Color = Color3.fromRGB(0, 255, 150)
-    rightStroke.Thickness = 1
-    rightStroke.Transparency = 0.5
-    local actionsScroll = Instance.new("ScrollingFrame")
-    actionsScroll.Name = "ActionsScroll"
-    actionsScroll.Size = UDim2.new(1, -10, 1, -10)
-    actionsScroll.Position = UDim2.fromOffset(5, 5)
-    actionsScroll.BackgroundTransparency = 1
-    actionsScroll.BorderSizePixel = 0
-    actionsScroll.ScrollBarThickness = 4
-    actionsScroll.ScrollBarImageColor3 = Color3.fromRGB(0, 255, 150)
-    actionsScroll.CanvasSize = UDim2.fromOffset(0, 0)
-    actionsScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    actionsScroll.Parent = rightPanel
-    local actionsLayout = Instance.new("UIListLayout", actionsScroll)
-    actionsLayout.Padding = UDim.new(0, 8)
-    actionsLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    local dragging = false
-    local dragInput, dragStart, startPos
-    titleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            dragStart = input.Position
-            startPos = main.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                end
-            end)
-        end
-    end)
-    titleBar.InputChanged:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseMovement then
-            dragInput = input
-        end
-    end)
-    game:GetService("UserInputService").InputChanged:Connect(function(input)
-        if input == dragInput and dragging then
-            local delta = input.Position - dragStart
-            main.Position = UDim2.new(
-                startPos.X.Scale,
-                startPos.X.Offset + delta.X,
-                startPos.Y.Scale,
-                startPos.Y.Offset + delta.Y
-            )
-        end
-    end)
-    closeBtn.MouseButton1Click:Connect(function()
-        local closeTween = TweenService:Create(main, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
-            Size = UDim2.fromOffset(0, 0)
-        })
-        closeTween:Play()
-        closeTween.Completed:Wait()
-        gui:Destroy()
-        Modules.ModuleExplorer.State.IsOpen = false
-    end)
-    return gui, main, moduleScroll, detailsScroll, actionsScroll
-end
-local function ScanModules()
-    local modules = {}
-    local locations = {
-        game:GetService("ReplicatedStorage"),
-        game:GetService("ReplicatedFirst"),
-        game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts", 5)
-    }
-    for _, location in pairs(locations) do
-        if location then
-            for _, obj in pairs(location:GetDescendants()) do
-                if obj:IsA("ModuleScript") then
-                    table.insert(modules, obj)
-                end
-            end
-        end
-    end
-    return modules
-end
-local function CreateModuleButton(module, parent, onClick)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 35)
-    btn.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-    btn.BorderSizePixel = 0
-    btn.Font = Enum.Font.Code
-    btn.Text = "  " .. module.Name
-    btn.TextColor3 = Color3.fromRGB(0, 255, 150)
-    btn.TextSize = 13
-    btn.TextXAlignment = Enum.TextXAlignment.Left
-    btn.AutoButtonColor = false
-    btn.Parent = parent
-    local btnCorner = Instance.new("UICorner", btn)
-    btnCorner.CornerRadius = UDim.new(0, 6)
-    local btnStroke = Instance.new("UIStroke", btn)
-    btnStroke.Color = Color3.fromRGB(0, 255, 150)
-    btnStroke.Thickness = 1
-    btnStroke.Transparency = 0.8
-    btn.MouseButton1Click:Connect(function()
-        onClick(module)
-        for _, child in pairs(parent:GetChildren()) do
-            if child:IsA("TextButton") then
-                child.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-            end
-        end
-        btn.BackgroundColor3 = Color3.fromRGB(0, 150, 100)
-    end)
-    btn.MouseEnter:Connect(function()
-        TweenService:Create(btnStroke, TweenInfo.new(0.2), {
-            Transparency = 0.3
-        }):Play()
-    end)
-    btn.MouseLeave:Connect(function()
-        TweenService:Create(btnStroke, TweenInfo.new(0.2), {
-            Transparency = 0.8
-        }):Play()
-    end)
-    return btn
-end
-local function CreateLabel(text, color, parent, isBold)
-    local label = Instance.new("TextLabel")
-    label.Size = UDim2.new(1, 0, 0, 0)
-    label.AutomaticSize = Enum.AutomaticSize.Y
-    label.BackgroundTransparency = 1
-    label.Font = isBold and Enum.Font.GothamBold or Enum.Font.Code
-    label.Text = text
-    label.TextColor3 = color or Color3.fromRGB(200, 200, 200)
-    label.TextSize = isBold and 14 or 12
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.TextWrapped = true
-    label.RichText = true
-    label.Parent = parent
-    return label
-end
-local function CreateActionButton(text, color, parent, onClick)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 35)
-    btn.BackgroundColor3 = color
-    btn.BorderSizePixel = 0
-    btn.Font = Enum.Font.GothamBold
-    btn.Text = text
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.TextSize = 12
-    btn.AutoButtonColor = false
-    btn.Parent = parent
-    local btnCorner = Instance.new("UICorner", btn)
-    btnCorner.CornerRadius = UDim.new(0, 6)
-    btn.MouseButton1Click:Connect(onClick)
-    btn.MouseEnter:Connect(function()
-        local h, s, v = color:ToHSV()
-        btn.BackgroundColor3 = Color3.fromHSV(h, s, math.min(v + 0.1, 1))
-    end)
-    btn.MouseLeave:Connect(function()
-        btn.BackgroundColor3 = color
-    end)
-    return btn
-end
-local function CreateInputField(placeholder, parent)
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 35)
-    frame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-    frame.BorderSizePixel = 0
-    frame.Parent = parent
-    local frameCorner = Instance.new("UICorner", frame)
-    frameCorner.CornerRadius = UDim.new(0, 6)
-    local frameStroke = Instance.new("UIStroke", frame)
-    frameStroke.Color = Color3.fromRGB(0, 255, 150)
-    frameStroke.Thickness = 1
-    frameStroke.Transparency = 0.7
-    local input = Instance.new("TextBox")
-    input.Size = UDim2.new(1, -10, 1, 0)
-    input.Position = UDim2.fromOffset(5, 0)
-    input.BackgroundTransparency = 1
-    input.Font = Enum.Font.Code
-    input.PlaceholderText = placeholder
-    input.PlaceholderColor3 = Color3.fromRGB(100, 100, 100)
-    input.Text = ""
-    input.TextColor3 = Color3.fromRGB(0, 255, 150)
-    input.TextSize = 12
-    input.TextXAlignment = Enum.TextXAlignment.Left
-    input.ClearTextOnFocus = false
-    input.Parent = frame
-    input.Focused:Connect(function()
-        TweenService:Create(frameStroke, TweenInfo.new(0.2), {
-            Transparency = 0.3
-        }):Play()
-    end)
-    input.FocusLost:Connect(function()
-        TweenService:Create(frameStroke, TweenInfo.new(0.2), {
-            Transparency = 0.7
-        }):Play()
-    end)
-    return input
-end
-local function ParseValue(str)
-    if str == "true" then
-        return true
-    elseif str == "false" then
-        return false
-    elseif str == "nil" then
-        return nil
-    elseif tonumber(str) then
-        return tonumber(str)
-    else
-        return str
-    end
-end
-local function GetNestedValue(tbl, path)
-    local current = tbl
-    for _, key in ipairs(path) do
-        if type(current) == "table" then
-            current = current[key]
-        else
-            return nil
-        end
-    end
-    return current
-end
-local function SetNestedValue(tbl, path, value)
-    local current = tbl
-    for i = 1, #path - 1 do
-        if type(current) == "table" then
-            current = current[path[i]]
-        else
-            return false
-        end
-    end
-    if type(current) == "table" then
-        current[path[#path]] = value
-        return true
-    end
-    return false
-end
-local function CreateClickableLabel(text, color, parent, isBold, onClick, path)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 0)
-    btn.AutomaticSize = Enum.AutomaticSize.Y
-    btn.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-    btn.BackgroundTransparency = 1
-    btn.BorderSizePixel = 0
-    btn.Font = isBold and Enum.Font.GothamBold or Enum.Font.Code
-    btn.Text = text
-    btn.TextColor3 = color or Color3.fromRGB(200, 200, 200)
-    btn.TextSize = isBold and 14 or 12
-    btn.TextXAlignment = Enum.TextXAlignment.Left
-    btn.TextWrapped = true
-    btn.RichText = true
-    btn.AutoButtonColor = false
-    btn.Parent = parent
-    if onClick then
-        btn.MouseButton1Click:Connect(function()
-            onClick(path)
-        end)
-        btn.MouseEnter:Connect(function()
-            btn.BackgroundTransparency = 0.9
-        end)
-        btn.MouseLeave:Connect(function()
-            btn.BackgroundTransparency = 1
-        end)
-    end
-    return btn
-end
-local function InspectValue(value, depth, maxDepth, detailsScroll, path, onSelect)
-    depth = depth or 0
-    maxDepth = maxDepth or 3
-    path = path or {}
-    if depth > maxDepth then
-        return "..."
-    end
-    local indent = string.rep("  ", depth)
-    local valueType = typeof(value)
-    if valueType == "table" then
-        CreateLabel(indent .. "{ -- Table", Color3.fromRGB(100, 200, 255), detailsScroll)
-        for k, v in pairs(value) do
-            local keyStr = tostring(k)
-            local valueStr = tostring(v)
-            local vType = typeof(v)
-            local currentPath = {table.unpack(path)}
-            table.insert(currentPath, k)
-            if vType == "function" then
-                CreateClickableLabel(
-                    indent .. "  " .. keyStr .. " = <function>",
-                    Color3.fromRGB(255, 150, 0),
-                    detailsScroll,
-                    false,
-                    onSelect,
-                    currentPath
-                )
-            elseif vType == "table" then
-                CreateClickableLabel(
-                    indent .. "  " .. keyStr .. " = <table>",
-                    Color3.fromRGB(100, 200, 255),
-                    detailsScroll,
-                    false,
-                    onSelect,
-                    currentPath
-                )
-                if depth < maxDepth then
-                    InspectValue(v, depth + 1, maxDepth, detailsScroll, currentPath, onSelect)
-                end
-            else
-                CreateClickableLabel(
-                    indent .. "  " .. keyStr .. " = " .. valueStr,
-                    Color3.fromRGB(0, 255, 150),
-                    detailsScroll,
-                    false,
-                    onSelect,
-                    currentPath
-                )
-            end
-        end
-        local mt = getmetatable(value)
-        if mt then
-            CreateLabel(indent .. "  __metatable = <table>", Color3.fromRGB(255, 0, 200), detailsScroll)
-            if depth < maxDepth then
-                local mtPath = {table.unpack(path)}
-                table.insert(mtPath, "__metatable")
-                InspectValue(mt, depth + 1, maxDepth, detailsScroll, mtPath, onSelect)
-            end
-        end
-        CreateLabel(indent .. "}", Color3.fromRGB(100, 200, 255), detailsScroll)
-    elseif valueType == "function" then
-        local info = debug.getinfo(value)
-        CreateLabel(indent .. "Function: " .. (info.name or "anonymous"), Color3.fromRGB(255, 150, 0), detailsScroll)
-        CreateLabel(indent .. "  Parameters: " .. info.nparams, Color3.fromRGB(180, 180, 180), detailsScroll)
-    else
-        CreateLabel(indent .. tostring(value) .. " (" .. valueType .. ")", Color3.fromRGB(200, 200, 200), detailsScroll)
-    end
-end
-local function DisplayActions(moduleResult, selectedPath, actionsScroll)
-    for _, child in pairs(actionsScroll:GetChildren()) do
-        if not child:IsA("UIListLayout") then
-            child:Destroy()
-        end
-    end
-    CreateLabel("═══ ACTIONS ═══", Color3.fromRGB(0, 255, 150), actionsScroll, true)
-    CreateLabel("", Color3.fromRGB(255, 255, 255), actionsScroll)
-    if #selectedPath == 0 then
-        CreateLabel("Select an item to modify", Color3.fromRGB(180, 180, 180), actionsScroll)
-        return
-    end
-    local pathStr = table.concat(selectedPath, ".")
-    CreateLabel("Selected: " .. pathStr, Color3.fromRGB(100, 200, 255), actionsScroll, true)
-    CreateLabel("", Color3.fromRGB(255, 255, 255), actionsScroll)
-    local value = GetNestedValue(moduleResult, selectedPath)
-    local valueType = typeof(value)
-    CreateLabel("Type: " .. valueType, Color3.fromRGB(180, 180, 180), actionsScroll)
-    CreateLabel("", Color3.fromRGB(255, 255, 255), actionsScroll)
-    if valueType ~= "function" then
-        CreateLabel("▸ Modify Value:", Color3.fromRGB(255, 200, 0), actionsScroll, true)
-        local valueInput = CreateInputField("New value...", actionsScroll)
-        CreateActionButton("Apply Change", Color3.fromRGB(0, 150, 255), actionsScroll, function()
-            local newValue = ParseValue(valueInput.Text)
-            if SetNestedValue(moduleResult, selectedPath, newValue) then
-                print(string.format("✓ Changed %s to %s", pathStr, tostring(newValue)))
-                valueInput.Text = ""
-            else
-                print("✗ Failed to modify value")
-            end
-        end)
-        CreateLabel("", Color3.fromRGB(255, 255, 255), actionsScroll)
-    end
-    if valueType == "function" then
-        CreateLabel("▸ Hook Function:", Color3.fromRGB(255, 150, 0), actionsScroll, true)
-        CreateActionButton("Hook - Log Calls", Color3.fromRGB(255, 100, 0), actionsScroll, function()
-            local originalFunc = value
-            local hookKey = pathStr
-            if Modules.ModuleExplorer.State.Hooks[hookKey] then
-                print("⚠ Function already hooked!")
-                return
-            end
-            local hooked = function(...)
-                local args = {...}
-                print(string.format("🔗 Hook [%s] called with %d args:", pathStr, #args))
-                for i, arg in ipairs(args) do
-                    print(string.format("  [%d] = %s (%s)", i, tostring(arg), typeof(arg)))
-                end
-                local results = {originalFunc(...)}
-                print(string.format("  → Returned %d values", #results))
-                return table.unpack(results)
-            end
-            Modules.ModuleExplorer.State.Hooks[hookKey] = originalFunc
-            SetNestedValue(moduleResult, selectedPath, hooked)
-            print(string.format("✓ Hooked function: %s", pathStr))
-        end)
-        CreateActionButton("Hook - Block Calls", Color3.fromRGB(255, 0, 100), actionsScroll, function()
-            local originalFunc = value
-            local hookKey = pathStr
-            if Modules.ModuleExplorer.State.Hooks[hookKey] then
-                print("⚠ Function already hooked!")
-                return
-            end
-            local hooked = function(...)
-                print(string.format("🚫 Blocked call to: %s", pathStr))
-                return nil
-            end
-            Modules.ModuleExplorer.State.Hooks[hookKey] = originalFunc
-            SetNestedValue(moduleResult, selectedPath, hooked)
-            print(string.format("✓ Blocked function: %s", pathStr))
-        end)
-        CreateActionButton("Hook - Force Return True", Color3.fromRGB(0, 200, 100), actionsScroll, function()
-            local originalFunc = value
-            local hookKey = pathStr
-            if Modules.ModuleExplorer.State.Hooks[hookKey] then
-                print("⚠ Function already hooked!")
-                return
-            end
-            local hooked = function(...)
-                originalFunc(...)
-                print(string.format("✓ Forced true return: %s", pathStr))
-                return true
-            end
-            Modules.ModuleExplorer.State.Hooks[hookKey] = originalFunc
-            SetNestedValue(moduleResult, selectedPath, hooked)
-            print(string.format("✓ Hooked to force return true: %s", pathStr))
-        end)
-        CreateActionButton("Hook - Force Return False", Color3.fromRGB(200, 50, 50), actionsScroll, function()
-            local originalFunc = value
-            local hookKey = pathStr
-            if Modules.ModuleExplorer.State.Hooks[hookKey] then
-                print("⚠ Function already hooked!")
-                return
-            end
-            local hooked = function(...)
-                originalFunc(...)
-                print(string.format("✓ Forced false return: %s", pathStr))
-                return false
-            end
-            Modules.ModuleExplorer.State.Hooks[hookKey] = originalFunc
-            SetNestedValue(moduleResult, selectedPath, hooked)
-            print(string.format("✓ Hooked to force return false: %s", pathStr))
-        end)
-        CreateActionButton("Hook - Force Return Nil", Color3.fromRGB(100, 100, 100), actionsScroll, function()
-            local originalFunc = value
-            local hookKey = pathStr
-            if Modules.ModuleExplorer.State.Hooks[hookKey] then
-                print("⚠ Function already hooked!")
-                return
-            end
-            local hooked = function(...)
-                originalFunc(...)
-                print(string.format("✓ Forced nil return: %s", pathStr))
-                return nil
-            end
-            Modules.ModuleExplorer.State.Hooks[hookKey] = originalFunc
-            SetNestedValue(moduleResult, selectedPath, hooked)
-            print(string.format("✓ Hooked to force return nil: %s", pathStr))
-        end)
-        CreateLabel("", Color3.fromRGB(255, 255, 255), actionsScroll)
-        CreateLabel("Custom Return:", Color3.fromRGB(150, 150, 255), actionsScroll, true)
-        local customReturnInput = CreateInputField("Return value...", actionsScroll)
-        CreateActionButton("Hook - Custom Return", Color3.fromRGB(150, 0, 255), actionsScroll, function()
-            local originalFunc = value
-            local hookKey = pathStr
-            if Modules.ModuleExplorer.State.Hooks[hookKey] then
-                print("⚠ Function already hooked!")
-                return
-            end
-            local customValue = ParseValue(customReturnInput.Text)
-            local hooked = function(...)
-                originalFunc(...)
-                print(string.format("✓ Forced custom return: %s -> %s", pathStr, tostring(customValue)))
-                return customValue
-            end
-            Modules.ModuleExplorer.State.Hooks[hookKey] = originalFunc
-            SetNestedValue(moduleResult, selectedPath, hooked)
-            print(string.format("✓ Hooked to force return: %s = %s", pathStr, tostring(customValue)))
-            customReturnInput.Text = ""
-        end)
-        CreateLabel("", Color3.fromRGB(255, 255, 255), actionsScroll)
-        CreateLabel("Numeric Multiplier:", Color3.fromRGB(255, 200, 100), actionsScroll, true)
-        local multiplierInput = CreateInputField("Multiplier (e.g., 999)...", actionsScroll)
-        CreateActionButton("Hook - Multiply Numbers", Color3.fromRGB(255, 150, 0), actionsScroll, function()
-            local originalFunc = value
-            local hookKey = pathStr
-            if Modules.ModuleExplorer.State.Hooks[hookKey] then
-                print("⚠ Function already hooked!")
-                return
-            end
-            local multiplier = tonumber(multiplierInput.Text) or 1
-            local hooked = function(...)
-                local results = {originalFunc(...)}
-                for i, result in ipairs(results) do
-                    if type(result) == "number" then
-                        results[i] = result * multiplier
-                    end
-                end
-                print(string.format("✓ Multiplied numeric returns by %d: %s", multiplier, pathStr))
-                return table.unpack(results)
-            end
-            Modules.ModuleExplorer.State.Hooks[hookKey] = originalFunc
-            SetNestedValue(moduleResult, selectedPath, hooked)
-            print(string.format("✓ Hooked with %dx multiplier: %s", multiplier, pathStr))
-            multiplierInput.Text = ""
-        end)
-        if Modules.ModuleExplorer.State.Hooks[pathStr] then
-            CreateLabel("", Color3.fromRGB(255, 255, 255), actionsScroll)
-            CreateActionButton("Unhook Function", Color3.fromRGB(0, 200, 100), actionsScroll, function()
-                local originalFunc = Modules.ModuleExplorer.State.Hooks[pathStr]
-                SetNestedValue(moduleResult, selectedPath, originalFunc)
-                Modules.ModuleExplorer.State.Hooks[pathStr] = nil
-                print(string.format("✓ Unhooked function: %s", pathStr))
-            end)
-        end
-        CreateLabel("", Color3.fromRGB(255, 255, 255), actionsScroll)
-    end
-    if valueType == "table" then
-        CreateLabel("▸ Ghost Index:", Color3.fromRGB(200, 0, 255), actionsScroll, true)
-        CreateLabel("Add fake properties that appear to exist", Color3.fromRGB(150, 150, 150), actionsScroll)
-        local ghostKeyInput = CreateInputField("Key name...", actionsScroll)
-        local ghostValueInput = CreateInputField("Value...", actionsScroll)
-        CreateActionButton("Add Ghost Index", Color3.fromRGB(200, 0, 255), actionsScroll, function()
-            local key = ghostKeyInput.Text
-            local val = ParseValue(ghostValueInput.Text)
-            if key == "" then
-                print("✗ Please enter a key name")
-                return
-            end
-            local ghostKey = pathStr .. ".__ghost__"
-            if not Modules.ModuleExplorer.State.GhostIndexes[ghostKey] then
-                Modules.ModuleExplorer.State.GhostIndexes[ghostKey] = {}
-            end
-            local mt = getmetatable(value) or {}
-            local oldIndex = mt.__index
-            mt.__index = function(tbl, k)
-                if Modules.ModuleExplorer.State.GhostIndexes[ghostKey][k] then
-                    print(string.format("👻 Ghost index accessed: %s.%s", pathStr, k))
-                    return Modules.ModuleExplorer.State.GhostIndexes[ghostKey][k]
-                end
-                if type(oldIndex) == "function" then
-                    return oldIndex(tbl, k)
-                elseif type(oldIndex) == "table" then
-                    return oldIndex[k]
-                end
-                return rawget(tbl, k)
-            end
-            setmetatable(value, mt)
-            Modules.ModuleExplorer.State.GhostIndexes[ghostKey][key] = val
-            print(string.format("✓ Added ghost index: %s.%s = %s", pathStr, key, tostring(val)))
-            ghostKeyInput.Text = ""
-            ghostValueInput.Text = ""
-        end)
-        CreateLabel("", Color3.fromRGB(255, 255, 255), actionsScroll)
-    end
-    CreateActionButton("Copy Path to Clipboard", Color3.fromRGB(100, 100, 100), actionsScroll, function()
-        setclipboard(pathStr)
-        print(string.format("✓ Copied to clipboard: %s", pathStr))
-    end)
-end
-local function DisplayModuleDetails(module, detailsScroll, actionsScroll)
-    for _, child in pairs(detailsScroll:GetChildren()) do
-        if not child:IsA("UIListLayout") then
-            child:Destroy()
-        end
-    end
-    CreateLabel("═══ MODULE: " .. module.Name .. " ═══", Color3.fromRGB(0, 255, 150), detailsScroll, true)
-    CreateLabel("Path: " .. module:GetFullName(), Color3.fromRGB(180, 180, 180), detailsScroll)
-    CreateLabel("", Color3.fromRGB(255, 255, 255), detailsScroll)
-    local success, result = pcall(require, module)
-    if not success then
-        CreateLabel("✗ Failed to require module:", Color3.fromRGB(255, 50, 100), detailsScroll, true)
-        CreateLabel(tostring(result), Color3.fromRGB(255, 100, 100), detailsScroll)
-        return
-    end
-    CreateLabel("✓ Module loaded successfully", Color3.fromRGB(0, 255, 100), detailsScroll, true)
-    CreateLabel("", Color3.fromRGB(255, 255, 255), detailsScroll)
-    local resultType = typeof(result)
-    CreateLabel("Type: " .. resultType, Color3.fromRGB(100, 200, 255), detailsScroll, true)
-    CreateLabel("", Color3.fromRGB(255, 255, 255), detailsScroll)
-    if resultType == "table" then
-        CreateLabel("═══ CONTENTS ═══", Color3.fromRGB(0, 255, 150), detailsScroll, true)
-        CreateLabel("Click any item to modify it", Color3.fromRGB(150, 150, 150), detailsScroll)
-        CreateLabel("", Color3.fromRGB(255, 255, 255), detailsScroll)
-        Modules.ModuleExplorer.State.ModuleResult = result
-        local function onSelect(path)
-            Modules.ModuleExplorer.State.SelectedPath = path
-            DisplayActions(result, path, actionsScroll)
-        end
-        InspectValue(result, 0, 2, detailsScroll, {}, onSelect)
-    else
-        CreateLabel("Value: " .. tostring(result), Color3.fromRGB(200, 200, 200), detailsScroll)
-    end
-end
-RegisterCommand({
-    Name = "Nodex",
-    Aliases = {},
-    Description = "Opens the module explorer GUI with patching, hooking, and ghost index features."
-}, function(args)
-    if Modules.ModuleExplorer.State.IsOpen then
-        print("Module Explorer is already open.")
-        return
-    end
-    print("Opening Module Explorer...")
-    local gui, main, moduleScroll, detailsScroll, actionsScroll = CreateGUI()
-    Modules.ModuleExplorer.State.GUI = gui
-    Modules.ModuleExplorer.State.IsOpen = true
-    main.Size = UDim2.fromOffset(0, 0)
-    local openTween = TweenService:Create(main, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-        Size = UDim2.fromOffset(1100, 650)
-    })
-    openTween:Play()
-    local modules = ScanModules()
-    print(string.format("Found %d modules", #modules))
-    for i, module in pairs(modules) do
-        CreateModuleButton(module, moduleScroll, function(selectedModule)
-            Modules.ModuleExplorer.State.SelectedModule = selectedModule
-            Modules.ModuleExplorer.State.SelectedPath = {}
-            DisplayModuleDetails(selectedModule, detailsScroll, actionsScroll)
-        end)
-    end
-    DisplayActions(nil, {}, actionsScroll)
-end)
+    end)   
 Modules.ScriptExecutor2 = {
     State = {
         IsEnabled = false,
@@ -16865,51 +16253,6 @@ function Modules.CreepSequence:Initialize()
         module:Execute(args[1])
     end)
 end
-Modules.NextGenDesync = {
-    State = {
-        IsEnabled = false
-    }
-}
-function Modules.NextGenDesync:Toggle()
-    if type(setfflag) ~= "function" then
-        return DoNotif("Architect Error: Executor does not support 'setfflag'.", 3)
-    end
-    if not self.State.IsEnabled then
-        local success, err = pcall(function()
-            setfflag("NextGenReplicatorEnabledWrite4", "false")
-            setfflag("NextGenReplicatorEnabledWrite4", "true")
-        end)
-        if success then
-            self.State.IsEnabled = true
-            DoNotif("NextGen Desync: ENABLED. Replicator authority hijacked.", 4)
-        else
-            warn("--> [NextGenDesync] Enable Failed:", err)
-            DoNotif("FFlag Error: Check F9 for details.", 4)
-        end
-    else
-        local success, err = pcall(function()
-            setfflag("NextGenReplicatorEnabledWrite4", "true")
-            setfflag("NextGenReplicatorEnabledWrite4", "false")
-        end)
-        if success then
-            self.State.IsEnabled = false
-            DoNotif("NextGen Desync: DISABLED. Re-synced with server.", 3)
-        else
-            warn("--> [NextGenDesync] Disable Failed:", err)
-            DoNotif("FFlag Error: Check F9 for details.", 4)
-        end
-    end
-end
-function Modules.NextGenDesync:Initialize()
-    local module = self
-    RegisterCommand({
-        Name = "newsync",
-        Aliases = {},
-        Description = "New method for desync WIP"
-    }, function()
-        module:Toggle()
-    end)
-end
 Modules.MirrorMimic = {
     State = {
         IsEnabled = false,
@@ -17204,33 +16547,69 @@ function Modules.ServerHopper:Initialize()
 end
 Modules.ForceSpawn = {}
 function Modules.ForceSpawn:Execute()
-    local Players = game:GetService("Players")
-    local Workspace = game:GetService("Workspace")
+    local Players   = game:GetService("Players")
+    local StarterGui = game:GetService("StarterGui")
     local localPlayer = Players.LocalPlayer
     if localPlayer.Character then
-        DoNotif("Your character already exists. Use '.respawn' to reset a broken character.", 4)
+        DoNotif("Character exists. Use '.respawn' to reset a broken character.", 4)
         return
     end
-    DoNotif("Attempting to trigger server-side spawn from nil character...", 2)
-    local success, err = pcall(function()
-        local tempModel = Instance.new("Model")
-        tempModel.Name = "ZukaSpawnTrigger"
-        tempModel.Parent = Workspace
-        localPlayer.Character = tempModel
-        task.wait()
-        localPlayer.Character = nil
-        tempModel:Destroy()
+    DoNotif("Attempting force spawn...", 2)
+    local ok1 = pcall(function()
+        StarterGui:SetCore("ResetButtonCallback", false)
+        task.delay(1, function()
+            pcall(function() StarterGui:SetCore("ResetButtonCallback", true) end)
+        end)
     end)
-    if not success then
-        warn("[ForceSpawn] Spawn trigger logic failed:", err)
-        DoNotif("Spawn trigger failed. See developer console for details.", 4)
+    local ok2 = false
+    if not ok1 then
+        ok2 = pcall(function()
+            localPlayer:LoadCharacter()
+        end)
     end
+    if not ok1 and not ok2 then
+        local ok3 = pcall(function()
+            local respawnRemote = Players:FindFirstChild("Events")
+                and Players.Events:FindFirstChild("RespawnCharacter")
+            if respawnRemote and respawnRemote:IsA("RemoteEvent") then
+                respawnRemote:FireServer()
+            end
+        end)
+        if not ok3 then
+            DoNotif("All spawn strategies failed. Try rejoining.", 4)
+            return
+        end
+    end
+    task.spawn(function()
+        if localPlayer.Character then return end
+        task.wait(0.5)
+        if localPlayer.Character then return end
+        local function scanForRespawn(parent)
+            for _, v in ipairs(parent:GetDescendants()) do
+                if v:IsA("RemoteEvent") then
+                    local name = v.Name:lower()
+                    if name:find("respawn") or name:find("spawn")
+                        or name:find("revive") or name:find("loadchar") then
+                        pcall(function() v:FireServer() end)
+                    end
+                end
+            end
+        end
+        pcall(function() scanForRespawn(game:GetService("ReplicatedStorage")) end)
+        pcall(function() scanForRespawn(Players) end)
+        task.wait(1)
+        if not localPlayer.Character then
+            DoNotif("Spawn attempts sent. If still stuck, rejoin.", 4)
+        else
+            DoNotif("Spawn successful.", 2)
+        end
+    end)
 end
 function Modules.ForceSpawn:Initialize()
     RegisterCommand({
-        Name = "spawn",
-        Aliases = {"forcespawn"},
-        Description = "Forces your character to spawn if you are stuck as a camera (no character)."
+        Name        = "spawn",
+        Aliases     = {"forcespawn", "fspawn"},
+        Description = "Forces a spawn when stuck with no character.",
     }, function()
         Modules.ForceSpawn:Execute()
     end)
@@ -17386,7 +16765,7 @@ Modules.HumanShield = {
         CharacterConnections = {}
     },
     Config = {
-        DISTANCE = 3.5,
+        DISTANCE = 4.5,
         VERTICAL_OFFSET = 0,
     },
     Dependencies = {"Players", "RunService"}
@@ -17947,157 +17326,6 @@ function Modules.NPCDmgNeutralizer:Initialize()
         DoNotif("Destroy DamageParts: " .. (module.Config.DESTROY_DAMAGE_PARTS and "ON" or "OFF"), 2)
     end)
 end
-Modules.NPCDmgNeutralizer = {
-    State = {
-        IsEnabled = false,
-        Neutralized = {},
-        Connections = {},
-    },
-    Config = {
-        DESTROY_DAMAGE_PARTS = false,
-        RESCAN_INTERVAL      = 1.5,
-        STRIP_BODY_TOUCHED   = true,
-        DAMAGE_PART_NAMES = {
-            "damage","hitbox","hit","hurtbox","attack",
-            "punch","slash","sword","blade","weapon",
-            "hurt","melee","fist","claw","bite",
-        },
-        BODY_PART_NAMES = {
-            "HumanoidRootPart","Torso","UpperTorso","LowerTorso",
-            "LeftArm","RightArm","LeftUpperArm","RightUpperArm",
-            "LeftLowerArm","RightLowerArm","LeftHand","RightHand","Head",
-        },
-    },
-}
-function Modules.NPCDmgNeutralizer:_isValidNPC(model)
-    if not model or not model.Parent then return false end
-    if model == LocalPlayer.Character then return false end
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr.Character == model then return false end
-    end
-    return model:FindFirstChild("HumanoidRootPart") ~= nil
-end
-function Modules.NPCDmgNeutralizer:_isDamagePart(part)
-    if not part:IsA("BasePart") then return false end
-    local n = part.Name:lower()
-    for _, kw in ipairs(self.Config.DAMAGE_PART_NAMES) do
-        if n:find(kw, 1, true) then return true end
-    end
-    return false
-end
-function Modules.NPCDmgNeutralizer:_isBodyPart(part)
-    if not part:IsA("BasePart") then return false end
-    if #self.Config.BODY_PART_NAMES == 0 then return true end
-    for _, name in ipairs(self.Config.BODY_PART_NAMES) do
-        if part.Name == name then return true end
-    end
-    return false
-end
-function Modules.NPCDmgNeutralizer:_stripTouched(part)
-    local count = 0
-    if getconnections then
-        for _, signal in ipairs({part.Touched, part.TouchEnded}) do
-            local ok, conns = pcall(getconnections, signal)
-            if ok and conns then
-                for _, conn in ipairs(conns) do
-                    pcall(function() conn:Disable() count = count + 1 end)
-                end
-            end
-        end
-    end
-    pcall(function() part.CanTouch = false end)
-    return count
-end
-function Modules.NPCDmgNeutralizer:_neutralize(model)
-    if not self:_isValidNPC(model) then return end
-    for _, desc in ipairs(model:GetDescendants()) do
-        if self:_isDamagePart(desc) then
-            if self.Config.DESTROY_DAMAGE_PARTS then
-                pcall(function() desc:Destroy() end)
-            else
-                self:_stripTouched(desc)
-            end
-        elseif self.Config.STRIP_BODY_TOUCHED and self:_isBodyPart(desc) then
-            self:_stripTouched(desc)
-        end
-    end
-    model.DescendantAdded:Connect(function(desc)
-        if not self.State.IsEnabled then return end
-        task.defer(function()
-            if self:_isDamagePart(desc) then
-                if self.Config.DESTROY_DAMAGE_PARTS then
-                    pcall(function() desc:Destroy() end)
-                else
-                    self:_stripTouched(desc)
-                end
-            elseif self.Config.STRIP_BODY_TOUCHED and self:_isBodyPart(desc) then
-                self:_stripTouched(desc)
-            end
-        end)
-    end)
-    self.State.Neutralized[model] = true
-end
-function Modules.NPCDmgNeutralizer:_scanAll()
-    for _, desc in ipairs(Workspace:GetDescendants()) do
-        if desc:IsA("Model") and not self.State.Neutralized[desc] and self:_isValidNPC(desc) then
-            self:_neutralize(desc)
-        end
-    end
-end
-function Modules.NPCDmgNeutralizer:Enable()
-    if self.State.IsEnabled then return end
-    self.State.IsEnabled = true
-    self.State.Neutralized = {}
-    self:_scanAll()
-    self.State.Connections.Added = Workspace.DescendantAdded:Connect(function(desc)
-        if not self.State.IsEnabled then return end
-        task.defer(function()
-            if desc:IsA("Model") and not self.State.Neutralized[desc] and self:_isValidNPC(desc) then
-                self:_neutralize(desc)
-            end
-        end)
-    end)
-    self.State.Connections.Removing = Workspace.DescendantRemoving:Connect(function(desc)
-        if desc:IsA("Model") then self.State.Neutralized[desc] = nil end
-    end)
-    task.spawn(function()
-        while self.State.IsEnabled do
-            task.wait(self.Config.RESCAN_INTERVAL)
-            if self.State.IsEnabled then self:_scanAll() end
-        end
-    end)
-    DoNotif("NPC Dmg Neutralizer: Enabled", 2)
-end
-function Modules.NPCDmgNeutralizer:Disable()
-    if not self.State.IsEnabled then return end
-    self.State.IsEnabled = false
-    for _, conn in pairs(self.State.Connections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    self.State.Connections = {}
-    DoNotif("NPC Dmg Neutralizer: Disabled (existing strips remain)", 2)
-end
-function Modules.NPCDmgNeutralizer:Toggle()
-    if self.State.IsEnabled then self:Disable() else self:Enable() end
-end
-function Modules.NPCDmgNeutralizer:Initialize()
-    local module = self
-    RegisterCommand({
-        Name = "npcneutralize",
-        Aliases = {"nn", "nodmg", "npcgod"},
-        Description = "Strips Touched damage connections from all NPC hitbox/body parts.",
-    }, function()
-        module:Toggle()
-    end)
-    RegisterCommand({
-        Name = "npcdestroyparts",
-        Aliases = {"ndp"},
-        Description = "Toggles whether DamageParts are destroyed entirely vs just disconnected.",
-    }, function()
-        module.Config.DESTROY_DAMAGE_PARTS = not module.Config.DESTROY_DAMAGE_PARTS
-        DoNotif("Destroy DamageParts: " .. (module.Config.DESTROY_DAMAGE_PARTS and "ON" or "OFF"), 2)
-    end)
-end
 Modules.HRPDesync = {
     State = {
         IsDetached   = false,
@@ -18105,34 +17333,37 @@ Modules.HRPDesync = {
         SavedMotors  = {},
         BodyParts    = {},
         BodyRoot     = nil,
+        HRPTarget    = nil,
+        HRPLock      = nil,
         Connections  = {},
         HeldKeys     = {},
     },
     Config = {
-        MOVE_SPEED   = 28,
-        OFFSET_DIST  = 5,
+        MOVE_SPEED    = 28,
+        OFFSET_DIST   = 5,
         OFFSET_HEIGHT = 0,
-        SMOOTH       = 0.18,
+        SMOOTH        = 0.18,
+        PART_LERP     = 0.35,
     },
 }
 local NPC_PART_OFFSETS = {
-    Head          = CFrame.new(0,  1.5,  0),
-    LeftUpperArm  = CFrame.new( 1.5, 0.8, 0),
-    RightUpperArm = CFrame.new(-1.5, 0.8, 0),
-    LeftLowerArm  = CFrame.new( 1.5,-0.3, 0),
-    RightLowerArm = CFrame.new(-1.5,-0.3, 0),
-    LeftHand      = CFrame.new( 1.5,-1.0, 0),
-    RightHand     = CFrame.new(-1.5,-1.0, 0),
-    LeftUpperLeg  = CFrame.new( 0.5,-1.5, 0),
-    RightUpperLeg = CFrame.new(-0.5,-1.5, 0),
-    LeftLowerLeg  = CFrame.new( 0.5,-2.5, 0),
-    RightLowerLeg = CFrame.new(-0.5,-2.5, 0),
-    LeftFoot      = CFrame.new( 0.5,-3.2, 0),
-    RightFoot     = CFrame.new(-0.5,-3.2, 0),
-    ["Left Arm"]  = CFrame.new( 1.5, 0,   0),
-    ["Right Arm"] = CFrame.new(-1.5, 0,   0),
-    ["Left Leg"]  = CFrame.new( 0.5,-2.0, 0),
-    ["Right Leg"] = CFrame.new(-0.5,-2.0, 0),
+    Head            = CFrame.new(0,    1.5,  0),
+    LeftUpperArm    = CFrame.new( 1.5, 0.8,  0),
+    RightUpperArm   = CFrame.new(-1.5, 0.8,  0),
+    LeftLowerArm    = CFrame.new( 1.5,-0.3,  0),
+    RightLowerArm   = CFrame.new(-1.5,-0.3,  0),
+    LeftHand        = CFrame.new( 1.5,-1.0,  0),
+    RightHand       = CFrame.new(-1.5,-1.0,  0),
+    LeftUpperLeg    = CFrame.new( 0.5,-1.5,  0),
+    RightUpperLeg   = CFrame.new(-0.5,-1.5,  0),
+    LeftLowerLeg    = CFrame.new( 0.5,-2.5,  0),
+    RightLowerLeg   = CFrame.new(-0.5,-2.5,  0),
+    LeftFoot        = CFrame.new( 0.5,-3.2,  0),
+    RightFoot       = CFrame.new(-0.5,-3.2,  0),
+    ["Left Arm"]    = CFrame.new( 1.5, 0,    0),
+    ["Right Arm"]   = CFrame.new(-1.5, 0,    0),
+    ["Left Leg"]    = CFrame.new( 0.5,-2.0,  0),
+    ["Right Leg"]   = CFrame.new(-0.5,-2.0,  0),
 }
 function Modules.HRPDesync:_getRig()
     local char = LocalPlayer.Character
@@ -18144,14 +17375,21 @@ end
 function Modules.HRPDesync:_getMotors(char)
     local motors = {}
     for _, desc in ipairs(char:GetDescendants()) do
-        if desc:IsA("Motor6D") and desc.Name ~= "Root" and desc.Name ~= "RootJoint" then
+        if desc:IsA("Motor6D")
+            and desc.Name ~= "Root"
+            and desc.Name ~= "RootJoint" then
             table.insert(motors, desc)
         end
     end
     return motors
 end
 function Modules.HRPDesync:_getBodyParts(char)
-    local skip = { HumanoidRootPart=true, Torso=true, UpperTorso=true, LowerTorso=true }
+    local skip = {
+        HumanoidRootPart = true,
+        Torso            = true,
+        UpperTorso       = true,
+        LowerTorso       = true,
+    }
     local parts = {}
     for _, desc in ipairs(char:GetDescendants()) do
         if desc:IsA("BasePart") and not skip[desc.Name] then
@@ -18162,10 +17400,11 @@ function Modules.HRPDesync:_getBodyParts(char)
 end
 function Modules.HRPDesync:Detach()
     local rigType, char = self:_getRig()
-    if not char or not rigType then return DoNotif("No character found.", 2) end
+    if not char or not rigType then
+        return DoNotif("No character found.", 2)
+    end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
-    self.State.BodyRoot = hrp.CFrame
     self.State.SavedMotors = {}
     for _, motor in ipairs(self:_getMotors(char)) do
         table.insert(self.State.SavedMotors, {
@@ -18176,57 +17415,40 @@ function Modules.HRPDesync:Detach()
         pcall(function() motor.Part0 = nil end)
     end
     self.State.BodyParts = self:_getBodyParts(char)
+    local yaw = math.atan2(-CurrentCamera.CFrame.LookVector.X, -CurrentCamera.CFrame.LookVector.Z)
+    self.State.BodyRoot = CFrame.new(hrp.Position) * CFrame.Angles(0, yaw, 0)
+    self.State.HRPTarget = hrp.CFrame
     local bp = Instance.new("BodyPosition")
     bp.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-    bp.D = 10000
-    bp.P = 100000
+    bp.D        = 10000
+    bp.P        = 100000
     bp.Position = hrp.Position
-    bp.Parent = hrp
+    bp.Parent   = hrp
     local bg = Instance.new("BodyGyro")
     bg.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-    bg.D = 10000
-    bg.P = 100000
-    bg.CFrame = hrp.CFrame
-    bg.Parent = hrp
-    self.State.HRPLock = {bp = bp, bg = bg}
+    bg.D         = 10000
+    bg.P         = 100000
+    bg.CFrame    = hrp.CFrame
+    bg.Parent    = hrp
+    self.State.HRPLock = { bp = bp, bg = bg }
     local hum = char:FindFirstChildOfClass("Humanoid")
     if hum then
         hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,     false)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Dead,        false)
     end
     self.State.IsDetached = true
-    self.State.WalkRoot = hrp.CFrame
     self.State.Connections.Render = RunService.RenderStepped:Connect(function(dt)
         if not self.State.IsDetached then return end
-        self:_updateWalkRoot(dt)
+        self:_updateBodyRoot(dt)
         self:_driveBodyParts()
+        self:_updateHRPLock()
     end)
     DoNotif("HRP Desync: DETACHED | Mode: " .. self.State.DriveMode, 2)
-end
-function Modules.HRPDesync:_updateWalkRoot(dt)
-    local char = LocalPlayer.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    local yaw = math.atan2(-CurrentCamera.CFrame.LookVector.X, -CurrentCamera.CFrame.LookVector.Z)
-    self.State.WalkRoot = CFrame.new(CurrentCamera.CFrame.Position) * CFrame.Angles(0, yaw, 0)
-end
-function Modules.HRPDesync:_driveBodyParts()
-    if not self.State.WalkRoot then return end
-    for _, part in ipairs(self.State.BodyParts) do
-        if part and part.Parent then
-            local offset = NPC_PART_OFFSETS[part.Name] or CFrame.new()
-            pcall(function()
-                part.CFrame = part.CFrame:Lerp(self.State.WalkRoot * offset, 0.35)
-            end)
-        end
-    end
 end
 function Modules.HRPDesync:Reattach()
     local _, char = self:_getRig()
     if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
     for _, saved in ipairs(self.State.SavedMotors) do
         pcall(function()
             saved.motor.Part0 = saved.p0
@@ -18237,15 +17459,15 @@ function Modules.HRPDesync:Reattach()
     self.State.SavedMotors = {}
     self.State.BodyParts   = {}
     if self.State.HRPLock then
-        if self.State.HRPLock.bp then self.State.HRPLock.bp:Destroy() end
-        if self.State.HRPLock.bg then self.State.HRPLock.bg:Destroy() end
+        pcall(function() self.State.HRPLock.bp:Destroy() end)
+        pcall(function() self.State.HRPLock.bg:Destroy() end)
         self.State.HRPLock = nil
     end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if hum then
         hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
-        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
-        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,     true)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Dead,        true)
     end
     if self.State.Connections.Render then
         self.State.Connections.Render:Disconnect()
@@ -18253,7 +17475,7 @@ function Modules.HRPDesync:Reattach()
     end
     self.State.IsDetached = false
     self.State.BodyRoot   = nil
-    self.State.WalkRoot   = nil
+    self.State.HRPTarget  = nil
     DoNotif("HRP Desync: Reattached.", 2)
 end
 function Modules.HRPDesync:Toggle()
@@ -18263,108 +17485,204 @@ function Modules.HRPDesync:_updateBodyRoot(dt)
     local br = self.State.BodyRoot
     if not br then return end
     local lerp = math.clamp(self.Config.SMOOTH * 60 * dt, 0, 1)
+    local cam  = CurrentCamera.CFrame
     if self.State.DriveMode == "camera" then
-        local dist = math.clamp((br.Position - CurrentCamera.CFrame.Position).Magnitude, 2, 60)
-        local yaw  = math.atan2(-CurrentCamera.CFrame.LookVector.X, -CurrentCamera.CFrame.LookVector.Z)
-        local goal = CFrame.new(CurrentCamera.CFrame.Position + CurrentCamera.CFrame.LookVector * dist)
-            * CFrame.Angles(0, yaw, 0)
+        local dist = math.clamp((br.Position - cam.Position).Magnitude, 2, 60)
+        local yaw  = math.atan2(-cam.LookVector.X, -cam.LookVector.Z)
+        local goal = CFrame.new(cam.Position + cam.LookVector * dist)
+                   * CFrame.Angles(0, yaw, 0)
         self.State.BodyRoot = br:Lerp(goal, lerp)
     elseif self.State.DriveMode == "wasd" then
-        local flat  = Vector3.new(CurrentCamera.CFrame.LookVector.X,  0, CurrentCamera.CFrame.LookVector.Z).Unit
-        local right = Vector3.new(CurrentCamera.CFrame.RightVector.X, 0, CurrentCamera.CFrame.RightVector.Z).Unit
+        local flat  = Vector3.new(cam.LookVector.X,  0, cam.LookVector.Z).Unit
+        local right = Vector3.new(cam.RightVector.X, 0, cam.RightVector.Z).Unit
         local move  = Vector3.zero
         local hk    = self.State.HeldKeys
-        if hk[Enum.KeyCode.W] then move = move + flat  end
-        if hk[Enum.KeyCode.S] then move = move - flat  end
-        if hk[Enum.KeyCode.A] then move = move - right end
-        if hk[Enum.KeyCode.D] then move = move + right end
-        if hk[Enum.KeyCode.E] then move = move + Vector3.new(0,1,0) end
-        if hk[Enum.KeyCode.Q] then move = move - Vector3.new(0,1,0) end
-        if move.Magnitude > 0 then move = move.Unit * self.Config.MOVE_SPEED * dt end
+        if hk[Enum.KeyCode.W] then move += flat  end
+        if hk[Enum.KeyCode.S] then move -= flat  end
+        if hk[Enum.KeyCode.A] then move -= right end
+        if hk[Enum.KeyCode.D] then move += right end
+        if hk[Enum.KeyCode.E] then move += Vector3.new(0, 1, 0) end
+        if hk[Enum.KeyCode.Q] then move -= Vector3.new(0, 1, 0) end
+        if move.Magnitude > 0 then
+            move = move.Unit * self.Config.MOVE_SPEED * dt
+        end
         local newPos = br.Position + move
         local yaw = move.Magnitude > 0.001
             and math.atan2(-move.X, -move.Z + 0.0001)
             or  math.atan2(-br.LookVector.X, -br.LookVector.Z)
         self.State.BodyRoot = CFrame.new(newPos) * CFrame.Angles(0, yaw, 0)
     elseif self.State.DriveMode == "offset" then
-        local goal = CurrentCamera.CFrame * CFrame.new(0, self.Config.OFFSET_HEIGHT, -self.Config.OFFSET_DIST)
-        local yaw  = math.atan2(-CurrentCamera.CFrame.LookVector.X, -CurrentCamera.CFrame.LookVector.Z)
-        self.State.BodyRoot = br:Lerp(CFrame.new(goal.Position) * CFrame.Angles(0, yaw, 0), lerp)
+        local goal = cam * CFrame.new(0, self.Config.OFFSET_HEIGHT, -self.Config.OFFSET_DIST)
+        local yaw  = math.atan2(-cam.LookVector.X, -cam.LookVector.Z)
+        self.State.BodyRoot = br:Lerp(
+            CFrame.new(goal.Position) * CFrame.Angles(0, yaw, 0), lerp)
     end
 end
 function Modules.HRPDesync:_driveBodyParts()
-    if not self.State.BodyRoot then return end
+    local root = self.State.BodyRoot
+    if not root then return end
+    local lerp = self.Config.PART_LERP
     for _, part in ipairs(self.State.BodyParts) do
         if part and part.Parent then
             local offset = NPC_PART_OFFSETS[part.Name] or CFrame.new()
             pcall(function()
-                part.CFrame = part.CFrame:Lerp(self.State.BodyRoot * offset, 0.35)
+                part.CFrame = part.CFrame:Lerp(root * offset, lerp)
             end)
         end
     end
 end
+function Modules.HRPDesync:_updateHRPLock()
+    local lock = self.State.HRPLock
+    if not lock then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    lock.bp.Position = hrp.Position
+    lock.bg.CFrame   = CFrame.new(hrp.Position) * CFrame.Angles(0,
+        math.atan2(-CurrentCamera.CFrame.LookVector.X,
+                   -CurrentCamera.CFrame.LookVector.Z), 0)
+end
 function Modules.HRPDesync:Initialize()
     local module = self
-    self.State.Connections.KeyDown = UserInputService.InputBegan:Connect(function(input, gpe)
-        if gpe then return end
-        module.State.HeldKeys[input.KeyCode] = true
-    end)
-    self.State.Connections.KeyUp = UserInputService.InputEnded:Connect(function(input)
-        module.State.HeldKeys[input.KeyCode] = false
-    end)
-    LocalPlayer.CharacterAdded:Connect(function()
-        module.State.IsDetached = false
-        module.State.BodyRoot   = nil
-        module.State.BodyParts  = {}
+    self.State.Connections.KeyDown = UserInputService.InputBegan:Connect(
+        function(input, gpe)
+            if gpe then return end
+            module.State.HeldKeys[input.KeyCode] = true
+        end)
+    self.State.Connections.KeyUp = UserInputService.InputEnded:Connect(
+        function(input)
+            module.State.HeldKeys[input.KeyCode] = false
+        end)
+    self.State.Connections.CharacterAdded = LocalPlayer.CharacterAdded:Connect(function()
+        if module.State.HRPLock then
+            pcall(function() module.State.HRPLock.bp:Destroy() end)
+            pcall(function() module.State.HRPLock.bg:Destroy() end)
+            module.State.HRPLock = nil
+        end
+        if module.State.Connections.Render then
+            module.State.Connections.Render:Disconnect()
+            module.State.Connections.Render = nil
+        end
+        module.State.IsDetached  = false
+        module.State.BodyRoot    = nil
+        module.State.HRPTarget   = nil
+        module.State.BodyParts   = {}
         module.State.SavedMotors = {}
     end)
     RegisterCommand({
-        Name = "hrp",
-        Aliases = {},
-        Description = "Toggles Motor6D body detach. HRP stays in place, body moves freely.",
-    }, function()
-        module:Toggle()
+        Name        = "hrp",
+        Aliases     = {"desync"},
+        Description = "Toggle Motor6D body desync. Body moves freely while HRP stays put.",
+    }, function() module:Toggle() end)
+    RegisterCommand({
+        Name        = "hrpmode",
+        Aliases     = {"desyncmode"},
+        Description = "Set drive mode: camera | wasd | offset",
+    }, function(args)
+        local mode = args[1] and args[1]:lower()
+        if mode == "camera" or mode == "wasd" or mode == "offset" then
+            module.State.DriveMode = mode
+            DoNotif("HRP Drive Mode: " .. mode, 2)
+        else
+            DoNotif("Modes: camera | wasd | offset", 2)
+        end
+    end)
+    RegisterCommand({
+        Name        = "hrpoffset",
+        Aliases     = {"desyncoffset"},
+        Description = "Set offset dist and height for offset mode. Usage: ;hrpoffset <dist> <height>",
+    }, function(args)
+        module.Config.OFFSET_DIST   = tonumber(args[1]) or module.Config.OFFSET_DIST
+        module.Config.OFFSET_HEIGHT = tonumber(args[2]) or module.Config.OFFSET_HEIGHT
+        DoNotif(("Offset: dist=%.1f height=%.1f"):format(
+            module.Config.OFFSET_DIST, module.Config.OFFSET_HEIGHT), 2)
     end)
 end
 Modules.VelocitySpoofer = {
     State = {
-        IsEnabled = false,
-        RootPart = nil,
-        Connections = {}
+        IsEnabled    = false,
+        RootPart     = nil,
+        Connections  = {},
+        Applying     = false,
     },
     Config = {
-        PoisonVector = Vector3.new(0, -10000, 0),
-        DisableRagdoll = true,
-        DisableFallingDown = true,
-        RagdollCheckInterval = 0.5
+        PoisonVector        = Vector3.new(0, -10000, 0),
+        PoisonJitter        = 120,
+        DisableRagdoll      = true,
+        DisableFallingDown  = true,
+        RagdollCheckInterval = 0.5,
+        StripConstraints    = true,
     }
 }
-function Modules.VelocitySpoofer:_applyVelocityChanger()
-    if not self.State.RootPart or not self.State.IsEnabled then return end
-    local realVelocity = self.State.RootPart.AssemblyLinearVelocity
-    self.State.RootPart.AssemblyLinearVelocity = self.Config.PoisonVector
-    RunService.RenderStepped:Wait()
-    if self.State.RootPart then
-        self.State.RootPart.AssemblyLinearVelocity = realVelocity
-    end
+function Modules.VelocitySpoofer:_getPoisonVector()
+    local cfg = self.Config
+    local base = cfg.PoisonVector
+    local j    = cfg.PoisonJitter
+    return Vector3.new(
+        base.X + math.random(-j, j),
+        base.Y,
+        base.Z + math.random(-j, j)
+    )
 end
-function Modules.VelocitySpoofer:_disableRagdollStates()
-    task.spawn(function()
-        while self.State.IsEnabled do
-            if LocalPlayer.Character then
-                local humanoid = LocalPlayer.Character:FindFirstChild("Humanoid")
-                if humanoid then
-                    if self.Config.DisableFallingDown then
-                        humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-                    end
-                    if self.Config.DisableRagdoll then
-                        humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+function Modules.VelocitySpoofer:_stripAttachedConstraints()
+    local hrp = self.State.RootPart
+    if not hrp then return end
+    pcall(function()
+        for _, c in ipairs(hrp:GetChildren()) do
+            if c:IsA("LinearVelocity") or c:IsA("VectorForce")
+                or c:IsA("BodyVelocity") or c:IsA("BodyForce")
+                or c:IsA("AlignPosition") or c:IsA("RocketPropulsion") then
+                c:Destroy()
+            end
+        end
+        for _, c in ipairs(hrp:GetChildren()) do
+            if c:IsA("Attachment") then
+                for _, constraint in ipairs(c:GetChildren()) do
+                    if constraint:IsA("AlignPosition") or constraint:IsA("LinearVelocity") then
+                        constraint:Destroy()
                     end
                 end
             end
-            task.wait(self.Config.RagdollCheckInterval)
         end
     end)
+end
+function Modules.VelocitySpoofer:_applyVelocityChanger()
+    if self.Applying then return end
+    local hrp = self.State.RootPart
+    if not hrp or not self.State.IsEnabled then return end
+    self.Applying = true
+    pcall(function()
+        if self.Config.StripConstraints then
+            self:_stripAttachedConstraints()
+        end
+        local real = hrp.AssemblyLinearVelocity
+        hrp.AssemblyLinearVelocity = self:_getPoisonVector()
+        RunService.RenderStepped:Wait()
+        if hrp and hrp.Parent then
+            hrp.AssemblyLinearVelocity = real
+        end
+    end)
+    self.Applying = false
+end
+function Modules.VelocitySpoofer:_disableRagdollStates()
+    local conn; conn = RunService.Heartbeat:Connect(function()
+        if not self.State.IsEnabled then
+            conn:Disconnect()
+            return
+        end
+        local char = LocalPlayer.Character
+        if not char then return end
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if not humanoid then return end
+        if self.Config.DisableFallingDown then
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+        end
+        if self.Config.DisableRagdoll then
+            humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+        end
+    end)
+    self.State.Connections.RagdollGuard = conn
 end
 function Modules.VelocitySpoofer:_updateRootPart()
     if LocalPlayer.Character then
@@ -18374,6 +17692,7 @@ end
 function Modules.VelocitySpoofer:Enable()
     if self.State.IsEnabled then return end
     self.State.IsEnabled = true
+    self.Applying        = false
     self:_updateRootPart()
     self.State.Connections.Heartbeat = RunService.Heartbeat:Connect(function()
         if not self.State.RootPart and LocalPlayer.Character then
@@ -18383,7 +17702,7 @@ function Modules.VelocitySpoofer:Enable()
             self:_applyVelocityChanger()
         end
     end)
-    self.State.Connections.CharacterAdded = LocalPlayer.CharacterAdded:Connect(function(character)
+    self.State.Connections.CharacterAdded = LocalPlayer.CharacterAdded:Connect(function()
         task.wait(0.1)
         self:_updateRootPart()
     end)
@@ -18393,14 +17712,14 @@ end
 function Modules.VelocitySpoofer:Disable()
     if not self.State.IsEnabled then return end
     self.State.IsEnabled = false
-    for _, connection in pairs(self.State.Connections) do
-        if connection then
-            connection:Disconnect()
-        end
+    self.Applying        = false
+    for _, conn in pairs(self.State.Connections) do
+        if conn then conn:Disconnect() end
     end
     self.State.Connections = {}
-    if LocalPlayer.Character then
-        local humanoid = LocalPlayer.Character:FindFirstChild("Humanoid")
+    local char = LocalPlayer.Character
+    if char then
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
         if humanoid then
             humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
             humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
@@ -18410,20 +17729,20 @@ function Modules.VelocitySpoofer:Disable()
     DoNotif("Velocity Spoofer: DISABLED", 2)
 end
 function Modules.VelocitySpoofer:Toggle()
-    if self.State.IsEnabled then
-        self:Disable()
-    else
-        self:Enable()
-    end
+    if self.State.IsEnabled then self:Disable() else self:Enable() end
 end
 function Modules.VelocitySpoofer:SetPoisonVector(x, y, z)
-    local newVector = Vector3.new(
+    self.Config.PoisonVector = Vector3.new(
         tonumber(x) or 0,
         tonumber(y) or -10000,
         tonumber(z) or 0
     )
-    self.Config.PoisonVector = newVector
-    DoNotif(string.format("Poison Vector: (%.0f, %.0f, %.0f)", newVector.X, newVector.Y, newVector.Z), 2)
+    local v = self.Config.PoisonVector
+    DoNotif(("Poison Vector: (%.0f, %.0f, %.0f)"):format(v.X, v.Y, v.Z), 2)
+end
+function Modules.VelocitySpoofer:SetJitter(amount)
+    self.Config.PoisonJitter = tonumber(amount) or 120
+    DoNotif(("Jitter: ±%d"):format(self.Config.PoisonJitter), 2)
 end
 function Modules.VelocitySpoofer:ToggleRagdoll()
     self.Config.DisableRagdoll = not self.Config.DisableRagdoll
@@ -18433,30 +17752,43 @@ function Modules.VelocitySpoofer:ToggleFallingDown()
     self.Config.DisableFallingDown = not self.Config.DisableFallingDown
     DoNotif("Falling Prevention: " .. (self.Config.DisableFallingDown and "ON" or "OFF"), 2)
 end
+function Modules.VelocitySpoofer:ToggleConstraintStripping()
+    self.Config.StripConstraints = not self.Config.StripConstraints
+    DoNotif("Constraint Stripping: " .. (self.Config.StripConstraints and "ON" or "OFF"), 2)
+end
 function Modules.VelocitySpoofer:Initialize()
     local module = self
     RegisterCommand({
-        Name = "velocityspoof",
-        Aliases = {"vspoof"},
-        Description = "Spoofs your velocity to prevent network detection/kicks."
-    }, function(args)
-        module:Toggle()
-    end)
+        Name        = "velocityspoof",
+        Aliases     = {"vspoof"},
+        Description = "Spoofs velocity to counter aimbot attachment/network kicks.",
+    }, function() module:Toggle() end)
     RegisterCommand({
-        Name = "poisonvector",
-        Aliases = {"setvector", "spoofvector"},
-        Description = "Set the poison vector for velocity spoofing. Usage: ;poisonvector <x> <y> <z>"
+        Name        = "poisonvector",
+        Aliases     = {"setvector", "spoofvector"},
+        Description = "Set the spoof vector. Usage: ;poisonvector <x> <y> <z>",
     }, function(args)
         if #args < 3 then
-            DoNotif(string.format("Current: (%.0f, %.0f, %.0f)", 
-                module.Config.PoisonVector.X, 
-                module.Config.PoisonVector.Y, 
-                module.Config.PoisonVector.Z), 3)
+            local v = module.Config.PoisonVector
+            DoNotif(("Current: (%.0f, %.0f, %.0f)"):format(v.X, v.Y, v.Z), 3)
             DoNotif("Usage: ;poisonvector <x> <y> <z>", 2)
             return
         end
         module:SetPoisonVector(args[1], args[2], args[3])
     end)
+    RegisterCommand({
+        Name        = "spooferjitter",
+        Aliases     = {"vjitter"},
+        Description = "Set XZ jitter amount for spoof pattern randomization.",
+    }, function(args)
+        module:SetJitter(args[1])
+    end)
+    RegisterCommand({
+        Name        = "stripconstraints",
+        Aliases     = {"stripvc"},
+        Description = "Toggle automatic removal of LinearVelocity/force constraints.",
+    }, function() module:ToggleConstraintStripping() end)
+end
     RegisterCommand({
         Name = "antiragdoll2",
         Aliases = {},
@@ -32974,523 +32306,554 @@ RegisterCommand({
     local RunService = game:GetService("RunService")
     local UserInputService = game:GetService("UserInputService")
     local Workspace = game:GetService("Workspace")
-    local Debris = game:GetService("Debris")
     local Camera = Workspace.CurrentCamera
     local LocalPlayer = Players.LocalPlayer
     LocalPlayer.ReplicationFocus = Workspace
+
     pcall(function()
-    	game:GetService("CoreGui").RobloxGui["CoreScripts/NetworkPause"]:Destroy()
+        game:GetService("CoreGui").RobloxGui["CoreScripts/NetworkPause"]:Destroy()
     end)
+
+    -- ── Ownership assertion ───────────────────────────────────────────────
     if not getgenv().Network then
-    	getgenv().Network = { BaseParts = {} }
-    	RunService.Heartbeat:Connect(function()
-    		sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
-    	end)
+        getgenv().Network = { BaseParts = {} }
+        RunService.Heartbeat:Connect(function()
+            sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
+            LocalPlayer.ReplicationFocus = Workspace
+        end)
+        RunService.RenderStepped:Connect(function()
+            sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
+        end)
     end
+
     local CONFIG = {
-    	UPDATE_INTERVAL = 0.01,
-    	MAX_PARTS = 800,
+        UPDATE_INTERVAL = 0.01,
+        MAX_PARTS       = 800,
     }
+
     local TARGET_PARTS = {}
-    local CONNECTIONS = {}
-    local sendTarget = nil
-    local blackHoleActive = false
-    local spectateActive = false
-    local targetMode = "Players"
-    local cycleIndex = 1
-    local cycleConnection = nil
-    local spectateMonitorConnection = nil
-    local DescendantAddedConnection = nil
-    local originalCameraType = nil
-    local originalCameraSubject = nil
+    local CONNECTIONS  = {}
+    local sendTarget   = nil
+    local blackHoleActive   = false
+    local spectateActive    = false
+    local targetMode        = "Players"
+    local cycleIndex        = 1
+    local cycleConnection              = nil
+    local spectateMonitorConnection    = nil
+    local DescendantAddedConnection    = nil
+    local originalCameraType           = nil
+    local originalCameraSubject        = nil
     local lastUpdate = 0
-    local Folder = Instance.new("Folder", Workspace)
-    local AnchorPart = Instance.new("Part", Folder)
+
+    local Folder      = Instance.new("Folder", Workspace)
+    local AnchorPart  = Instance.new("Part", Folder)
     local Attachment1 = Instance.new("Attachment", AnchorPart)
-    AnchorPart.Anchored = false
-    AnchorPart.CanCollide = true
+    AnchorPart.Anchored    = false
+    AnchorPart.CanCollide  = true
     AnchorPart.Transparency = 1
+
     local overlapParams = OverlapParams.new()
     overlapParams.FilterType = Enum.RaycastFilterType.Exclude
-    overlapParams.MaxParts = 500
+    overlapParams.MaxParts   = 500
+
     local function getPartsInRadius(centerPos, radius)
-    	local char = LocalPlayer.Character
-    	overlapParams.FilterDescendantsInstances = char and { char } or {}
-    	local parts = Workspace:GetPartBoundsInRadius(centerPos, radius, overlapParams)
-    	-- also sweep around the target so we grab parts near them too
-    	if sendTarget then
-    		local targetChar = sendTarget.Character
-    		local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
-    		if targetRoot then
-    			local targetParts = Workspace:GetPartBoundsInRadius(targetRoot.Position, CONFIG.RADIUS, overlapParams)
-    			for _, p in ipairs(targetParts) do
-    				table.insert(parts, p)
-    			end
-    		end
-    	end
-    	return parts
+        local char = LocalPlayer.Character
+        overlapParams.FilterDescendantsInstances = char and { char } or {}
+        local parts = Workspace:GetPartBoundsInRadius(centerPos, radius, overlapParams)
+        if sendTarget then
+            local targetChar = sendTarget.Character
+            local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+            if targetRoot then
+                local targetParts = Workspace:GetPartBoundsInRadius(
+                    targetRoot.Position, CONFIG.RADIUS, overlapParams)
+                for _, p in ipairs(targetParts) do
+                    table.insert(parts, p)
+                end
+            end
+        end
+        return parts
     end
+
     local function releasePart(part)
-    	local data = TARGET_PARTS[part]
-    	if not data then return end
-    	if data.conn then data.conn:Disconnect() end
-    	pcall(function()
-    		local bv = part:FindFirstChildOfClass("BodyVelocity")
-    		if bv then bv:Destroy() end
-    		if data.alignPos and data.alignPos.Parent then data.alignPos:Destroy() end
-    		if data.attachment and data.attachment.Parent then data.attachment:Destroy() end
-    		if data.torque and data.torque.Parent then data.torque:Destroy() end
-    	end)
-    	TARGET_PARTS[part] = nil
+        local data = TARGET_PARTS[part]
+        if not data then return end
+        if data.conn then data.conn:Disconnect() end
+        pcall(function()
+            local bv = part:FindFirstChildOfClass("BodyVelocity")
+            if bv then bv:Destroy() end
+            if data.alignPos   and data.alignPos.Parent   then data.alignPos:Destroy() end
+            if data.attachment and data.attachment.Parent then data.attachment:Destroy() end
+            if data.torque     and data.torque.Parent     then data.torque:Destroy() end
+        end)
+        TARGET_PARTS[part] = nil
     end
+
+    local function claimOwnership(part)
+        -- direct network ownership claim — multiple methods for executor compatibility
+        pcall(function() part:SetNetworkOwner(LocalPlayer) end)
+        pcall(function() sethiddenproperty(part, "NetworkOwnershipRule", 0) end)
+    end
+
     local function forcePart(part)
-    	if not part:IsA("BasePart") then return end
-    	if TARGET_PARTS[part] then return end
-    	if part.Anchored then return end
-    	if part.Parent and part.Parent:FindFirstChildOfClass("Humanoid") then return end
-    	if part.Parent and part.Parent:FindFirstChild("Head") then return end
-    	if part.Name == "Handle" then return end
-    	local count = 0
-    	for _ in pairs(TARGET_PARTS) do count += 1 end
-    	if count >= CONFIG.MAX_PARTS then return end
-    	pcall(function()
-    		for _, c in ipairs(part:GetChildren()) do
-    			if c:IsA("BodyMover") or c:IsA("RocketPropulsion")
-    				or c:IsA("LinearVelocity") or c:IsA("VectorForce")
-    				or c:IsA("BodyVelocity") or c:IsA("BodyForce") then
-    				c:Destroy()
-    			end
-    		end
-    	end)
-    	part.CanCollide = true
-    	part.Massless = false
+        if not part:IsA("BasePart") then return end
+        if TARGET_PARTS[part] then return end
+        if part.Anchored then return end
+        if part.Parent and part.Parent:FindFirstChildOfClass("Humanoid") then return end
+        if part.Parent and part.Parent:FindFirstChild("Head") then return end
+        if part.Name == "Handle" then return end
+        local count = 0
+        for _ in pairs(TARGET_PARTS) do count += 1 end
+        if count >= CONFIG.MAX_PARTS then return end
 
-    	-- fire a BodyVelocity directly at the target right now
-    	local function launchAtTarget()
-    		if not sendTarget then return end
-    		local targetChar = sendTarget.Character
-    		local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
-    		if not targetRoot then return end
-    		pcall(function()
-    			-- remove old mover first
-    			local old = part:FindFirstChildOfClass("BodyVelocity")
-    			if old then old:Destroy() end
-    			local bv = Instance.new("BodyVelocity")
-    			bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
-    			local dir = (targetRoot.Position - part.Position).Unit
-    			bv.Velocity = dir * 500
-    			bv.Parent = part
-    		end)
-    	end
+        pcall(function()
+            for _, c in ipairs(part:GetChildren()) do
+                if c:IsA("BodyMover") or c:IsA("RocketPropulsion")
+                    or c:IsA("LinearVelocity") or c:IsA("VectorForce")
+                    or c:IsA("BodyVelocity") or c:IsA("BodyForce") then
+                    c:Destroy()
+                end
+            end
+        end)
 
-    	launchAtTarget()
+        part.CanCollide = true
+        part.Massless   = false
+        claimOwnership(part)
 
-    	local conn
-    	conn = RunService.Heartbeat:Connect(function()
-    		if not part.Parent then
-    			releasePart(part)
-    			return
-    		end
-    		if not blackHoleActive then
-    			releasePart(part)
-    			return
-    		end
-    		if sendTarget then
-    			local targetChar = sendTarget.Character
-    			local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
-    			if targetRoot then
-    				-- constantly re-aim the velocity so it tracks them if they move
-    				local bv = part:FindFirstChildOfClass("BodyVelocity")
-    				if bv then
-    					bv.Velocity = (targetRoot.Position - part.Position).Unit * 500
-    				else
-    					launchAtTarget()
-    				end
-    			end
-    		end
-    	end)
-    	TARGET_PARTS[part] = { conn = conn }
+        local function launchAtTarget()
+            if not sendTarget then return end
+            local targetChar = sendTarget.Character
+            local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+            if not targetRoot then return end
+            pcall(function()
+                local old = part:FindFirstChildOfClass("BodyVelocity")
+                if old then old:Destroy() end
+                local bv = Instance.new("BodyVelocity")
+                bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+                bv.Velocity = (targetRoot.Position - part.Position).Unit * 500
+                bv.Parent   = part
+            end)
+        end
+
+        launchAtTarget()
+
+        local conn
+        conn = RunService.Heartbeat:Connect(function()
+            if not part.Parent then releasePart(part); return end
+            if not blackHoleActive then releasePart(part); return end
+            -- re-assert ownership every frame so other clients can't contest it
+            claimOwnership(part)
+            if sendTarget then
+                local targetChar = sendTarget.Character
+                local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+                if targetRoot then
+                    local bv = part:FindFirstChildOfClass("BodyVelocity")
+                    if bv then
+                        bv.Velocity = (targetRoot.Position - part.Position).Unit * 500
+                    else
+                        launchAtTarget()
+                    end
+                end
+            end
+        end)
+        TARGET_PARTS[part] = { conn = conn }
     end
+
     local function cleanupStaleParts()
-    	for part in pairs(TARGET_PARTS) do
-    		if not part.Parent then releasePart(part) end
-    	end
+        for part in pairs(TARGET_PARTS) do
+            if not part.Parent then releasePart(part) end
+        end
     end
+
     local function blackholeLoop()
-    	local now = tick()
-    	if now - lastUpdate < CONFIG.UPDATE_INTERVAL then return end
-    	lastUpdate = now
-    	if not blackHoleActive then return end
-    	cleanupStaleParts()
+        local now = tick()
+        if now - lastUpdate < CONFIG.UPDATE_INTERVAL then return end
+        lastUpdate = now
+        if not blackHoleActive then return end
+        cleanupStaleParts()
     end
     table.insert(CONNECTIONS, RunService.Heartbeat:Connect(blackholeLoop))
+
     local function getPlayer(name)
-    	local query = name:lower()
-    	for _, p in ipairs(Players:GetPlayers()) do
-    		if p ~= LocalPlayer then
-    			if p.Name:lower():find(query, 1, true)
-    				or p.DisplayName:lower():find(query, 1, true) then
-    				return p
-    			end
-    		end
-    	end
+        local query = name:lower()
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then
+                if p.Name:lower():find(query, 1, true)
+                    or p.DisplayName:lower():find(query, 1, true) then
+                    return p
+                end
+            end
+        end
     end
+
     local function getValidPlayers()
-    	local valid = {}
-    	for _, p in ipairs(Players:GetPlayers()) do
-    		if p ~= LocalPlayer and p.Character
-    			and p.Character:FindFirstChild("HumanoidRootPart") then
-    			table.insert(valid, p)
-    		end
-    	end
-    	return valid
+        local valid = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character
+                and p.Character:FindFirstChild("HumanoidRootPart") then
+                table.insert(valid, p)
+            end
+        end
+        return valid
     end
+
     local function isTargetValid(target)
-    	return target
-    		and target.Character
-    		and target.Character:FindFirstChildOfClass("Humanoid")
-    		and target.Character.Humanoid.Health > 0
+        return target
+            and target.Character
+            and target.Character:FindFirstChildOfClass("Humanoid")
+            and target.Character.Humanoid.Health > 0
     end
+
     local function startSpectating()
-    	if not isTargetValid(sendTarget) then return end
-    	local humanoid = sendTarget.Character:FindFirstChildOfClass("Humanoid")
-    	if not humanoid then return end
-    	if not originalCameraType then
-    		originalCameraType = Camera.CameraType
-    		originalCameraSubject = Camera.CameraSubject
-    	end
-    	Camera.CameraType = Enum.CameraType.Custom
-    	Camera.CameraSubject = humanoid
+        if not isTargetValid(sendTarget) then return end
+        local humanoid = sendTarget.Character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then return end
+        if not originalCameraType then
+            originalCameraType    = Camera.CameraType
+            originalCameraSubject = Camera.CameraSubject
+        end
+        Camera.CameraType    = Enum.CameraType.Custom
+        Camera.CameraSubject = humanoid
     end
+
     local function stopSpectating()
-    	if originalCameraType and originalCameraSubject then
-    		Camera.CameraType = originalCameraType
-    		Camera.CameraSubject = originalCameraSubject
-    	else
-    		Camera.CameraType = Enum.CameraType.Custom
-    		Camera.CameraSubject = LocalPlayer.Character
-    			and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-    	end
-    	originalCameraType = nil
-    	originalCameraSubject = nil
+        if originalCameraType and originalCameraSubject then
+            Camera.CameraType    = originalCameraType
+            Camera.CameraSubject = originalCameraSubject
+        else
+            Camera.CameraType    = Enum.CameraType.Custom
+            Camera.CameraSubject = LocalPlayer.Character
+                and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        end
+        originalCameraType    = nil
+        originalCameraSubject = nil
     end
+
+    -- ── GUI ───────────────────────────────────────────────────────────────
     local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "BH_Gui"
-    screenGui.ResetOnSpawn = false
+    screenGui.Name          = "BH_Gui"
+    screenGui.ResetOnSpawn  = false
     screenGui.IgnoreGuiInset = true
-    screenGui.Parent = (pcall(function() return gethui() end) and gethui()) or LocalPlayer.PlayerGui
+    screenGui.Parent = (pcall(function() return gethui() end) and gethui())
+        or LocalPlayer.PlayerGui
+
     local Main = Instance.new("Frame")
-    Main.Size = UDim2.new(0, 240, 0, 160)
-    Main.Position = UDim2.new(0, 16, 0, 16)
-    Main.BackgroundColor3 = Color3.fromRGB(14, 14, 14)
+    Main.Size                 = UDim2.new(0, 240, 0, 160)
+    Main.Position             = UDim2.new(0, 16, 0, 16)
+    Main.BackgroundColor3     = Color3.fromRGB(14, 14, 14)
     Main.BackgroundTransparency = 0.2
-    Main.BorderSizePixel = 0
-    Main.Active = true
-    Main.Draggable = true
-    Main.Parent = screenGui
-    local mainCorner = Instance.new("UICorner")
-    mainCorner.CornerRadius = UDim.new(0, 10)
-    mainCorner.Parent = Main
-    local mainStroke = Instance.new("UIStroke")
-    mainStroke.Color = Color3.fromRGB(50, 50, 50)
-    mainStroke.Thickness = 1
-    mainStroke.Parent = Main
+    Main.BorderSizePixel      = 0
+    Main.Active               = true
+    Main.Draggable            = true
+    Main.Parent               = screenGui
+
+    local function corner(parent, radius)
+        local c = Instance.new("UICorner", parent)
+        c.CornerRadius = UDim.new(0, radius or 8)
+        return c
+    end
+    local function stroke(parent, color, thickness)
+        local s = Instance.new("UIStroke", parent)
+        s.Color     = color or Color3.fromRGB(50, 50, 50)
+        s.Thickness = thickness or 1
+        return s
+    end
+
+    corner(Main, 10); stroke(Main)
+
     local titleLabel = Instance.new("TextLabel")
-    titleLabel.Size = UDim2.new(1, 0, 0, 28)
-    titleLabel.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+    titleLabel.Size                  = UDim2.new(1, 0, 0, 28)
+    titleLabel.BackgroundColor3      = Color3.fromRGB(22, 22, 22)
     titleLabel.BackgroundTransparency = 0.1
-    titleLabel.BorderSizePixel = 0
-    titleLabel.Font = Enum.Font.Code
-    titleLabel.Text = "Part Flinger"
-    titleLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-    titleLabel.TextSize = 12
-    titleLabel.Parent = Main
-    local titleCorner = Instance.new("UICorner")
-    titleCorner.CornerRadius = UDim.new(0, 8)
-    titleCorner.Parent = titleLabel
+    titleLabel.BorderSizePixel       = 0
+    titleLabel.Font                  = Enum.Font.Code
+    titleLabel.Text                  = "Part Flinger"
+    titleLabel.TextColor3            = Color3.fromRGB(200, 200, 200)
+    titleLabel.TextSize              = 12
+    titleLabel.Parent                = Main
+    corner(titleLabel)
+
     local inputBox = Instance.new("TextBox")
-    inputBox.Size = UDim2.new(0, 148, 0, 30)
-    inputBox.Position = UDim2.new(0, 8, 0, 34)
-    inputBox.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
-    inputBox.BorderSizePixel = 0
-    inputBox.PlaceholderText = "player name..."
-    inputBox.PlaceholderColor3 = Color3.fromRGB(65, 65, 65)
-    inputBox.Text = ""
-    inputBox.TextColor3 = Color3.fromRGB(210, 210, 210)
-    inputBox.TextSize = 13
-    inputBox.Font = Enum.Font.Code
-    inputBox.ClearTextOnFocus = false
-    inputBox.Parent = Main
-    local inputCorner = Instance.new("UICorner")
-    inputCorner.CornerRadius = UDim.new(0, 6)
-    inputCorner.Parent = inputBox
-    local inputStroke = Instance.new("UIStroke")
-    inputStroke.Color = Color3.fromRGB(45, 45, 45)
-    inputStroke.Thickness = 1
-    inputStroke.Parent = inputBox
+    inputBox.Size               = UDim2.new(0, 148, 0, 30)
+    inputBox.Position           = UDim2.new(0, 8, 0, 34)
+    inputBox.BackgroundColor3   = Color3.fromRGB(24, 24, 24)
+    inputBox.BorderSizePixel    = 0
+    inputBox.PlaceholderText    = "player name..."
+    inputBox.PlaceholderColor3  = Color3.fromRGB(65, 65, 65)
+    inputBox.Text               = ""
+    inputBox.TextColor3         = Color3.fromRGB(210, 210, 210)
+    inputBox.TextSize           = 13
+    inputBox.Font               = Enum.Font.Code
+    inputBox.ClearTextOnFocus   = false
+    inputBox.Parent             = Main
+    corner(inputBox, 6); stroke(inputBox, Color3.fromRGB(45, 45, 45))
+
     local modeBtn = Instance.new("TextButton")
-    modeBtn.Size = UDim2.new(0, 72, 0, 30)
-    modeBtn.Position = UDim2.new(0, 162, 0, 34)
+    modeBtn.Size             = UDim2.new(0, 72, 0, 30)
+    modeBtn.Position         = UDim2.new(0, 162, 0, 34)
     modeBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-    modeBtn.BorderSizePixel = 0
-    modeBtn.Font = Enum.Font.Code
-    modeBtn.Text = "Players"
-    modeBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-    modeBtn.TextSize = 12
-    modeBtn.Parent = Main
-    local modeBtnCorner = Instance.new("UICorner")
-    modeBtnCorner.CornerRadius = UDim.new(0, 6)
-    modeBtnCorner.Parent = modeBtn
+    modeBtn.BorderSizePixel  = 0
+    modeBtn.Font             = Enum.Font.Code
+    modeBtn.Text             = "Players"
+    modeBtn.TextColor3       = Color3.fromRGB(200, 200, 200)
+    modeBtn.TextSize         = 12
+    modeBtn.Parent           = Main
+    corner(modeBtn, 6)
+
     local bringBtn = Instance.new("TextButton")
-    bringBtn.Size = UDim2.new(0, 108, 0, 28)
-    bringBtn.Position = UDim2.new(0, 8, 0, 72)
+    bringBtn.Size             = UDim2.new(0, 108, 0, 28)
+    bringBtn.Position         = UDim2.new(0, 8, 0, 72)
     bringBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-    bringBtn.BorderSizePixel = 0
-    bringBtn.Font = Enum.Font.Code
-    bringBtn.Text = "Bring: Off"
-    bringBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-    bringBtn.TextSize = 12
-    bringBtn.Parent = Main
-    local bringBtnCorner = Instance.new("UICorner")
-    bringBtnCorner.CornerRadius = UDim.new(0, 6)
-    bringBtnCorner.Parent = bringBtn
+    bringBtn.BorderSizePixel  = 0
+    bringBtn.Font             = Enum.Font.Code
+    bringBtn.Text             = "Bring: Off"
+    bringBtn.TextColor3       = Color3.fromRGB(200, 200, 200)
+    bringBtn.TextSize         = 12
+    bringBtn.Parent           = Main
+    corner(bringBtn, 6)
+
     local spectateBtn = Instance.new("TextButton")
-    spectateBtn.Size = UDim2.new(0, 108, 0, 28)
-    spectateBtn.Position = UDim2.new(0, 124, 0, 72)
+    spectateBtn.Size             = UDim2.new(0, 108, 0, 28)
+    spectateBtn.Position         = UDim2.new(0, 124, 0, 72)
     spectateBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-    spectateBtn.BorderSizePixel = 0
-    spectateBtn.Font = Enum.Font.Code
-    spectateBtn.Text = "Spectate: Off"
-    spectateBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-    spectateBtn.TextSize = 12
-    spectateBtn.Parent = Main
-    local spectateBtnCorner = Instance.new("UICorner")
-    spectateBtnCorner.CornerRadius = UDim.new(0, 6)
-    spectateBtnCorner.Parent = spectateBtn
+    spectateBtn.BorderSizePixel  = 0
+    spectateBtn.Font             = Enum.Font.Code
+    spectateBtn.Text             = "Spectate: Off"
+    spectateBtn.TextColor3       = Color3.fromRGB(200, 200, 200)
+    spectateBtn.TextSize         = 12
+    spectateBtn.Parent           = Main
+    corner(spectateBtn, 6)
+
     local statusLabel = Instance.new("TextLabel")
-    statusLabel.Size = UDim2.new(1, -16, 0, 24)
-    statusLabel.Position = UDim2.new(0, 8, 0, 108)
-    statusLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    statusLabel.Size                  = UDim2.new(1, -16, 0, 24)
+    statusLabel.Position              = UDim2.new(0, 8, 0, 108)
+    statusLabel.BackgroundColor3      = Color3.fromRGB(20, 20, 20)
     statusLabel.BackgroundTransparency = 0.1
-    statusLabel.BorderSizePixel = 0
-    statusLabel.Font = Enum.Font.Code
-    statusLabel.Text = "idle"
-    statusLabel.TextColor3 = Color3.fromRGB(80, 80, 80)
-    statusLabel.TextSize = 11
-    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-    statusLabel.Parent = Main
-    local statusCorner = Instance.new("UICorner")
-    statusCorner.CornerRadius = UDim.new(0, 6)
-    statusCorner.Parent = statusLabel
-    local statusPadding = Instance.new("UIPadding")
+    statusLabel.BorderSizePixel       = 0
+    statusLabel.Font                  = Enum.Font.Code
+    statusLabel.Text                  = "idle"
+    statusLabel.TextColor3            = Color3.fromRGB(80, 80, 80)
+    statusLabel.TextSize              = 11
+    statusLabel.TextXAlignment        = Enum.TextXAlignment.Left
+    statusLabel.Parent                = Main
+    corner(statusLabel, 6)
+    local statusPadding = Instance.new("UIPadding", statusLabel)
     statusPadding.PaddingLeft = UDim.new(0, 6)
-    statusPadding.Parent = statusLabel
+
     local countLabel = Instance.new("TextLabel")
-    countLabel.Size = UDim2.new(1, -16, 0, 16)
-    countLabel.Position = UDim2.new(0, 8, 0, 136)
+    countLabel.Size               = UDim2.new(1, -16, 0, 16)
+    countLabel.Position           = UDim2.new(0, 8, 0, 136)
     countLabel.BackgroundTransparency = 1
-    countLabel.Font = Enum.Font.Code
-    countLabel.Text = ""
-    countLabel.TextColor3 = Color3.fromRGB(60, 60, 60)
-    countLabel.TextSize = 10
-    countLabel.TextXAlignment = Enum.TextXAlignment.Left
-    countLabel.Parent = Main
+    countLabel.Font               = Enum.Font.Code
+    countLabel.Text               = ""
+    countLabel.TextColor3         = Color3.fromRGB(60, 60, 60)
+    countLabel.TextSize           = 10
+    countLabel.TextXAlignment     = Enum.TextXAlignment.Left
+    countLabel.Parent             = Main
+
+    -- ── Logic ─────────────────────────────────────────────────────────────
     local function setStatus(msg, color)
-    	statusLabel.Text = msg
-    	statusLabel.TextColor3 = color or Color3.fromRGB(80, 80, 80)
+        statusLabel.Text       = msg
+        statusLabel.TextColor3 = color or Color3.fromRGB(80, 80, 80)
     end
+
     local function setTarget(player)
-    	sendTarget = player
-    	if player then
-    		setStatus("→ " .. player.Name .. " (" .. player.DisplayName .. ")", Color3.fromRGB(200, 80, 80))
-    	else
-    		setStatus("idle")
-    	end
+        sendTarget = player
+        if player then
+            setStatus("→ " .. player.Name .. " (" .. player.DisplayName .. ")",
+                Color3.fromRGB(200, 80, 80))
+        else
+            setStatus("idle")
+        end
     end
+
     local function stopBlackhole()
-    	blackHoleActive = false
-    	bringBtn.Text = "Bring: Off"
-    	bringBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-    	if DescendantAddedConnection then
-    		DescendantAddedConnection:Disconnect()
-    		DescendantAddedConnection = nil
-    	end
-    	if cycleConnection then
-    		cycleConnection:Disconnect()
-    		cycleConnection = nil
-    	end
-    	for part in pairs(TARGET_PARTS) do releasePart(part) end
+        blackHoleActive = false
+        bringBtn.Text             = "Bring: Off"
+        bringBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+        if DescendantAddedConnection then
+            DescendantAddedConnection:Disconnect()
+            DescendantAddedConnection = nil
+        end
+        if cycleConnection then
+            cycleConnection:Disconnect()
+            cycleConnection = nil
+        end
+        for part in pairs(TARGET_PARTS) do releasePart(part) end
     end
+
     local function startBlackhole()
-    	if not sendTarget then return end
-    	blackHoleActive = true
-    	bringBtn.Text = "Bring: On"
-    	bringBtn.BackgroundColor3 = Color3.fromRGB(160, 35, 35)
-    	-- update Attachment1 to target immediately
-    	local targetChar = sendTarget.Character
-    	local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
-    	if targetRoot then Attachment1.WorldCFrame = targetRoot.CFrame end
-    	-- grab every single descendant in workspace right now
-    	task.spawn(function()
-    		for _, v in ipairs(Workspace:GetDescendants()) do
-    			forcePart(v)
-    		end
-    	end)
-    	-- also catch anything that spawns in after
-    	DescendantAddedConnection = Workspace.DescendantAdded:Connect(function(v)
-    		if blackHoleActive then
-    			task.spawn(function() forcePart(v) end)
-    		end
-    	end)
-    	if targetMode == "All" then
-    		cycleConnection = RunService.Heartbeat:Connect(function()
-    			if tick() % 3 < 0.05 then
-    				local players = getValidPlayers()
-    				if #players > 0 then
-    					cycleIndex = (cycleIndex % #players) + 1
-    					setTarget(players[cycleIndex])
-    				end
-    			end
-    		end)
-    	end
+        if not sendTarget then return end
+        blackHoleActive = true
+        bringBtn.Text             = "Bring: On"
+        bringBtn.BackgroundColor3 = Color3.fromRGB(160, 35, 35)
+        local targetChar = sendTarget.Character
+        local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+        if targetRoot then Attachment1.WorldCFrame = targetRoot.CFrame end
+        task.spawn(function()
+            for _, v in ipairs(Workspace:GetDescendants()) do
+                forcePart(v)
+            end
+        end)
+        DescendantAddedConnection = Workspace.DescendantAdded:Connect(function(v)
+            if blackHoleActive then
+                task.spawn(function() forcePart(v) end)
+            end
+        end)
+        if targetMode == "All" then
+            cycleConnection = RunService.Heartbeat:Connect(function()
+                if tick() % 3 < 0.05 then
+                    local players = getValidPlayers()
+                    if #players > 0 then
+                        cycleIndex = (cycleIndex % #players) + 1
+                        setTarget(players[cycleIndex])
+                    end
+                end
+            end)
+        end
     end
+
     local function toggleSpectate()
-    	if not sendTarget then return end
-    	spectateActive = not spectateActive
-    	spectateBtn.Text = spectateActive and "Spectate: On" or "Spectate: Off"
-    	spectateBtn.BackgroundColor3 = spectateActive
-    		and Color3.fromRGB(40, 80, 140)
-    		or Color3.fromRGB(45, 45, 45)
-    	if spectateActive then
-    		startSpectating()
-    		if spectateMonitorConnection then spectateMonitorConnection:Disconnect() end
-    		spectateMonitorConnection = RunService.Heartbeat:Connect(function()
-    			if not spectateActive then
-    				spectateMonitorConnection:Disconnect()
-    				return
-    			end
-    			if not isTargetValid(sendTarget) then
-    				stopSpectating()
-    				spectateActive = false
-    				spectateBtn.Text = "Spectate: Off"
-    				spectateBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-    			elseif Camera.CameraSubject
-    				~= sendTarget.Character:FindFirstChildOfClass("Humanoid") then
-    				startSpectating()
-    			end
-    		end)
-    	else
-    		stopSpectating()
-    		if spectateMonitorConnection then
-    			spectateMonitorConnection:Disconnect()
-    			spectateMonitorConnection = nil
-    		end
-    	end
+        if not sendTarget then return end
+        spectateActive = not spectateActive
+        spectateBtn.Text             = spectateActive and "Spectate: On" or "Spectate: Off"
+        spectateBtn.BackgroundColor3 = spectateActive
+            and Color3.fromRGB(40, 80, 140) or Color3.fromRGB(45, 45, 45)
+        if spectateActive then
+            startSpectating()
+            if spectateMonitorConnection then spectateMonitorConnection:Disconnect() end
+            spectateMonitorConnection = RunService.Heartbeat:Connect(function()
+                if not spectateActive then
+                    spectateMonitorConnection:Disconnect(); return
+                end
+                if not isTargetValid(sendTarget) then
+                    stopSpectating()
+                    spectateActive             = false
+                    spectateBtn.Text           = "Spectate: Off"
+                    spectateBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+                elseif Camera.CameraSubject
+                    ~= sendTarget.Character:FindFirstChildOfClass("Humanoid") then
+                    startSpectating()
+                end
+            end)
+        else
+            stopSpectating()
+            if spectateMonitorConnection then
+                spectateMonitorConnection:Disconnect()
+                spectateMonitorConnection = nil
+            end
+        end
     end
+
     table.insert(CONNECTIONS, RunService.Heartbeat:Connect(function()
-    	if blackHoleActive then
-    		local count = 0
-    		for _ in pairs(TARGET_PARTS) do count += 1 end
-    		countLabel.Text = "parts claimed: " .. count
-    	else
-    		countLabel.Text = ""
-    	end
+        if blackHoleActive then
+            local count = 0
+            for _ in pairs(TARGET_PARTS) do count += 1 end
+            countLabel.Text = "parts claimed: " .. count
+        else
+            countLabel.Text = ""
+        end
     end))
+
     bringBtn.MouseButton1Click:Connect(function()
-    	if blackHoleActive then
-    		stopBlackhole()
-    	else
-    		if targetMode == "Players" then
-    			local p = getPlayer(inputBox.Text)
-    			if not p then
-    				setStatus("not found: " .. inputBox.Text, Color3.fromRGB(200, 80, 80))
-    				return
-    			end
-    			setTarget(p)
-    		else
-    			local players = getValidPlayers()
-    			if #players == 0 then
-    				setStatus("no valid players", Color3.fromRGB(200, 80, 80))
-    				return
-    			end
-    			setTarget(players[1])
-    		end
-    		startBlackhole()
-    	end
+        if blackHoleActive then
+            stopBlackhole()
+        else
+            if targetMode == "Players" then
+                local p = getPlayer(inputBox.Text)
+                if not p then
+                    setStatus("not found: " .. inputBox.Text, Color3.fromRGB(200, 80, 80))
+                    return
+                end
+                setTarget(p)
+            else
+                local players = getValidPlayers()
+                if #players == 0 then
+                    setStatus("no valid players", Color3.fromRGB(200, 80, 80))
+                    return
+                end
+                setTarget(players[1])
+            end
+            startBlackhole()
+        end
     end)
+
     spectateBtn.MouseButton1Click:Connect(toggleSpectate)
+
     modeBtn.MouseButton1Click:Connect(function()
-    	targetMode = targetMode == "Players" and "All" or "Players"
-    	modeBtn.Text = targetMode
-    	inputBox.Visible = targetMode == "Players"
-    	if blackHoleActive then
-    		stopBlackhole()
-    		if targetMode == "All" then
-    			local players = getValidPlayers()
-    			if #players > 0 then
-    				setTarget(players[1])
-    				startBlackhole()
-    			end
-    		end
-    	end
+        targetMode        = targetMode == "Players" and "All" or "Players"
+        modeBtn.Text      = targetMode
+        inputBox.Visible  = targetMode == "Players"
+        if blackHoleActive then
+            stopBlackhole()
+            if targetMode == "All" then
+                local players = getValidPlayers()
+                if #players > 0 then
+                    setTarget(players[1])
+                    startBlackhole()
+                end
+            end
+        end
     end)
+
     inputBox.FocusLost:Connect(function(enterPressed)
-    	if not enterPressed then return end
-    	local p = getPlayer(inputBox.Text)
-    	if p then
-    		inputBox.Text = p.Name
-    		if not blackHoleActive then
-    			setTarget(p)
-    		end
-    	else
-    		setStatus("not found: " .. inputBox.Text, Color3.fromRGB(200, 80, 80))
-    	end
+        if not enterPressed then return end
+        local p = getPlayer(inputBox.Text)
+        if p then
+            inputBox.Text = p.Name
+            if not blackHoleActive then setTarget(p) end
+        else
+            setStatus("not found: " .. inputBox.Text, Color3.fromRGB(200, 80, 80))
+        end
     end)
+
     Players.PlayerRemoving:Connect(function(p)
-    	if p == sendTarget then
-    		if spectateActive then
-    			stopSpectating()
-    			spectateActive = false
-    			spectateBtn.Text = "Spectate: Off"
-    			spectateBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-    		end
-    		if blackHoleActive and targetMode == "All" then
-    			local players = getValidPlayers()
-    			if #players > 0 then
-    				setTarget(players[1])
-    			else
-    				stopBlackhole()
-    				setStatus("no players left")
-    			end
-    		elseif blackHoleActive then
-    			stopBlackhole()
-    			setStatus("target left")
-    		else
-    			setTarget(nil)
-    		end
-    	end
+        if p == sendTarget then
+            if spectateActive then
+                stopSpectating()
+                spectateActive               = false
+                spectateBtn.Text             = "Spectate: Off"
+                spectateBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+            end
+            if blackHoleActive and targetMode == "All" then
+                local players = getValidPlayers()
+                if #players > 0 then
+                    setTarget(players[1])
+                else
+                    stopBlackhole(); setStatus("no players left")
+                end
+            elseif blackHoleActive then
+                stopBlackhole(); setStatus("target left")
+            else
+                setTarget(nil)
+            end
+        end
     end)
+
     local guiVisible = true
     UserInputService.InputBegan:Connect(function(input, gpe)
-    	if gpe then return end
-    	if input.KeyCode == Enum.KeyCode.RightControl then
-    		guiVisible = not guiVisible
-    		local t = guiVisible and 0.05 or 1
-    		TweenService:Create(Main, TweenInfo.new(0.25), { BackgroundTransparency = t }):Play()
-    		for _, child in ipairs(Main:GetDescendants()) do
-    			if child:IsA("TextLabel") or child:IsA("TextButton") or child:IsA("TextBox") then
-    				TweenService:Create(child, TweenInfo.new(0.25), {
-    					TextTransparency = guiVisible and 0 or 1,
-    					BackgroundTransparency = guiVisible and 0.05 or 1,
-    				}):Play()
-    			end
-    		end
-    		Main.Active = guiVisible
-    		Main.Draggable = guiVisible
-    	end
+        if gpe then return end
+        if input.KeyCode == Enum.KeyCode.RightControl then
+            guiVisible = not guiVisible
+            local t = guiVisible and 0.05 or 1
+            TweenService:Create(Main, TweenInfo.new(0.25),
+                { BackgroundTransparency = t }):Play()
+            for _, child in ipairs(Main:GetDescendants()) do
+                if child:IsA("TextLabel") or child:IsA("TextButton")
+                    or child:IsA("TextBox") then
+                    TweenService:Create(child, TweenInfo.new(0.25), {
+                        TextTransparency      = guiVisible and 0 or 1,
+                        BackgroundTransparency = guiVisible and 0.05 or 1,
+                    }):Play()
+                end
+            end
+            Main.Active    = guiVisible
+            Main.Draggable = guiVisible
+        end
     end)
+
     setStatus("idle")
 end)
+
 Modules.ServerSideBackdoor = {
     State = {
         IsOpen = false,
@@ -35107,7 +34470,7 @@ RegisterCommand({Name = "touchfling", Aliases = {}, Description = "Loads the tou
 RegisterCommand({Name = "umpff", Aliases = {}, Description = "For Backrooms." }, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/ZukaTechPanel/refs/heads/main/UMPteamkiller.lua", "Loaded") end)
 RegisterCommand({Name = "lunaaimbot", Aliases = {"lunagc"}, Description = "Work In Progress" }, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/Main-Repo/refs/heads/main/GamingChair.lua", "Loaded") end)
 RegisterCommand({Name = "ibtools", Aliases = {"btools"}, Description = "Upgraded Gui For Btools"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/ZukaTechPanel/refs/heads/main/buildtools.lua", "Loading Revamped Btools Gui") end)
-RegisterCommand({Name = "Zex", Aliases = {"Dex"}, Description = "Updated Dex+"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/Main-Repo/refs/heads/main/Zex.lua", "Loading Zex..") end)
+RegisterCommand({Name = "Zex", Aliases = {"Dex"}, Description = "Updated Dex+"}, function() loadstringCmd("https://raw.githubusercontent.com/idioticanisgae-pixel/LuaDecompiler/refs/heads/main/Zex.lua", "Loading Zex..") end)
 RegisterCommand({Name = "walkvoid", Aliases = {"wv"}, Description = "Stops you from falling into the void."}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/Main-Repo/refs/heads/main/WalkVoid.lua", "You are now safe from falling into the void.") end)
 RegisterCommand({Name = "zspy", Aliases = {"adonisrspy"}, Description = "in beta"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/Main-Repo/refs/heads/main/executor_scripts/SimpleSpyRework.lua", "in beta...") end)
 RegisterCommand({Name = "csgo", Aliases = {"bhop"}, Description = "Bhop movement"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/ZukaTechPanel/refs/heads/main/phoon.lua", "Loading") end)
@@ -35119,11 +34482,11 @@ RegisterCommand({Name = "zmelee", Aliases = {}, Description = "For https://www.r
 RegisterCommand({Name = "poisongun", Aliases = {"pgun"}, Description = "Weapon Patcher"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/Main-Repo/refs/heads/main/universalweaponpatcher.lua", "Loading GUI..") end)
 RegisterCommand({Name = "rem", Aliases = {}, Description = "In game exploit creation kit.."}, function() loadstringCmd("https://e-vil.com/anbu/rem.lua", "Loading Rem.") end)
 RegisterCommand({Name = "Copyconsole", Aliases = {"copy"}, Description = "Allows you to copy errors from the console.."}, function() loadstringCmd("https://raw.githubusercontent.com/scriptlisenbe-stack/luaprojectse3/refs/heads/main/consolecopy.lua", "Copy Console Activated.") end)
-RegisterCommand({Name = "besp", Aliases = {}, Description = "For https://www.roblox.com/games/14419907512/Zombie-game"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/Main-Repo/refs/heads/main/BasicEsp.lua", "Loading Box esp") end)
+RegisterCommand({Name = "Decompiler", Aliases = {"zec"}, Description = "Better Decompiler GUI"}, function() loadstringCmd("https://raw.githubusercontent.com/idioticanisgae-pixel/LuaDecompiler/refs/heads/main/DecompilerLuau.lua", "Loading Decompiler") end)
 RegisterCommand({Name = "reachfix", Aliases = {"fix"}, Description = "Makes your equipped tool invisible when using reach"}, function() loadstringCmd("https://raw.githubusercontent.com/legalize8ga-maker/Scripts/refs/heads/main/InvisibleEquippedTool.lua", "Fixed") end)
 RegisterCommand({Name = "worldofstands", Aliases = {"wos"}, Description = "For https://www.roblox.com/games/6728870912/World-of-Stands - Removes dash cooldown"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/ZukaTechPanel/refs/heads/main/WOS.lua", "Loading, Wait a sec.") end)
 RegisterCommand({Name = "zfucker", Aliases = {}, Description = "zfucker for the zl series."}, function() loadstringCmd("https://raw.githubusercontent.com/osukfcdays/zlfucker/refs/heads/main/main.luau", "Loading, Wait a sec.") end)
-RegisterCommand({Name = "ConvertR6", Aliases = {}, Description = "Work In progress"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/Main-Repo/refs/heads/main/r15tor6.lua", "Loading, Wait a sec.") end)
+RegisterCommand({Name = "ConvertR6", Aliases = {"r6"}, Description = "Work In progress"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/Main-Repo/refs/heads/main/r15tor6.lua", "Loading, Wait a sec.") end)
 RegisterCommand({Name = "flinggun", Aliases = {}, Description = "For backrooms"}, function() loadstringCmd("https://raw.githubusercontent.com/zukatech1/Main-Repo/refs/heads/main/patchgunflingversion.lua", "Loading, Wait a sec.") end)
 local coreGuiTypeNames = {
 	["inventory"] = Enum.CoreGuiType.Backpack,
@@ -36771,6 +36134,4 @@ task.spawn(function()
     Modules.AdminOrb:Spawn()
 end)
 
-loadstring(game:HttpGet("https://raw.githubusercontent.com/idioticanisgae-pixel/MainSourceHub/refs/heads/main/luna.lua"))()
-
-warn("open source cause i don't care anymore")
+--loadstring(game:HttpGet("https://raw.githubusercontent.com/idioticanisgae-pixel/MainSourceHub/refs/heads/main/luna.lua"))()
