@@ -17829,7 +17829,6 @@ end
         print("================================")
         DoNotif("Settings printed to console (F9)", 2)
     end)
-end
 Modules.GuiRemover = {
     State = {
         RemovedGuis = {},
