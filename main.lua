@@ -1476,11 +1476,11 @@ RegisterCommand({
 end)
 Modules.Freecam = {
     State = {
-        IsEnabled = false,
-        Connections = {},
-        Camera = nil,
+        IsEnabled          = false,
+        Connections        = {},
+        Camera             = nil,
         OriginalCameraType = nil,
-        OriginalCFrame = nil,
+        OriginalCFrame     = nil,
     },
     Config = {
         BaseSpeed       = 32,
@@ -1489,43 +1489,42 @@ Modules.Freecam = {
         Sensitivity     = 0.35,
         SpeedMin        = 4,
         SpeedMax        = 512,
-        SmoothFactor    = 0.18,
-    }
+        SmoothFactor    = 12,
+    },
 }
 local UIS     = game:GetService("UserInputService")
 local RunSvc  = game:GetService("RunService")
 local Players = game:GetService("Players")
 local KEYS = {
-    Forward  = Enum.KeyCode.W,
-    Backward = Enum.KeyCode.S,
-    Left     = Enum.KeyCode.A,
-    Right    = Enum.KeyCode.D,
-    Up       = Enum.KeyCode.E,
-    Down     = Enum.KeyCode.Q,
-    Sprint   = Enum.KeyCode.LeftShift,
-    SpeedUp  = Enum.KeyCode.Equals,
-    SpeedDown= Enum.KeyCode.Minus,
+    Forward   = Enum.KeyCode.W,
+    Backward  = Enum.KeyCode.S,
+    Left      = Enum.KeyCode.A,
+    Right     = Enum.KeyCode.D,
+    Up        = Enum.KeyCode.E,
+    Down      = Enum.KeyCode.Q,
+    Sprint    = Enum.KeyCode.LeftShift,
+    SpeedUp   = Enum.KeyCode.Equals,
+    SpeedDown = Enum.KeyCode.Minus,
 }
 function Modules.Freecam:Enable()
     if self.State.IsEnabled then return end
     self.State.IsEnabled = true
     local cam = workspace.CurrentCamera
-    self.State.Camera            = cam
-    self.State.OriginalCameraType= cam.CameraType
-    self.State.OriginalCFrame    = cam.CFrame
-    cam.CameraType = Enum.CameraType.Scriptable
-    UIS.MouseBehavior   = Enum.MouseBehavior.LockCenter
-    UIS.MouseIconEnabled= false
-    local cfg      = self.Config
-    local yaw, pitch = 0, 0
-    local velocity   = Vector3.new(0, 0, 0)
+    self.State.Camera             = cam
+    self.State.OriginalCameraType = cam.CameraType
+    self.State.OriginalCFrame     = cam.CFrame
+    pcall(function() UIS.MouseBehavior    = Enum.MouseBehavior.LockCenter end)
+    pcall(function() UIS.MouseIconEnabled = false end)
+    local cfg          = self.Config
+    local yaw, pitch   = 0, 0
+    local velocity     = Vector3.zero
     local currentSpeed = cfg.BaseSpeed
-    local initCF = cam.CFrame
-    local _, iY, _ = initCF:ToEulerAnglesYXZ()
+    local _, iY, _ = cam.CFrame:ToEulerAnglesYXZ()
     yaw = iY
     self.State.Connections.MouseMove = UIS.InputChanged:Connect(function(inp)
+        if not self.State.IsEnabled then return end
         if inp.UserInputType == Enum.UserInputType.MouseMovement then
-            yaw   = yaw   - inp.Delta.X * cfg.Sensitivity * 0.01
+            yaw   = yaw - inp.Delta.X * cfg.Sensitivity * 0.01
             pitch = math.clamp(
                 pitch - inp.Delta.Y * cfg.Sensitivity * 0.01,
                 math.rad(-89), math.rad(89)
@@ -1533,6 +1532,7 @@ function Modules.Freecam:Enable()
         end
     end)
     self.State.Connections.Scroll = UIS.InputChanged:Connect(function(inp)
+        if not self.State.IsEnabled then return end
         if inp.UserInputType == Enum.UserInputType.MouseWheel then
             currentSpeed = math.clamp(
                 currentSpeed + inp.Position.Z * cfg.ScrollStep,
@@ -1541,31 +1541,31 @@ function Modules.Freecam:Enable()
         end
     end)
     self.State.Connections.SpeedKey = UIS.InputBegan:Connect(function(inp, gpe)
-        if gpe then return end
+        if gpe or not self.State.IsEnabled then return end
         if inp.KeyCode == KEYS.SpeedUp then
             currentSpeed = math.clamp(currentSpeed + cfg.ScrollStep, cfg.SpeedMin, cfg.SpeedMax)
         elseif inp.KeyCode == KEYS.SpeedDown then
             currentSpeed = math.clamp(currentSpeed - cfg.ScrollStep, cfg.SpeedMin, cfg.SpeedMax)
         end
     end)
-    self.State.Connections.Heartbeat = RunSvc.Heartbeat:Connect(function(dt)
+    self.State.Connections.Render = RunSvc.RenderStepped:Connect(function(dt)
+        if not self.State.IsEnabled then return end
+        cam.CameraType = Enum.CameraType.Scriptable
         local speed = currentSpeed
             * (UIS:IsKeyDown(KEYS.Sprint) and cfg.ShiftMultiplier or 1)
-        local moveVec = Vector3.new(
+        local move = Vector3.new(
             (UIS:IsKeyDown(KEYS.Right)    and 1 or 0) - (UIS:IsKeyDown(KEYS.Left)    and 1 or 0),
             (UIS:IsKeyDown(KEYS.Up)       and 1 or 0) - (UIS:IsKeyDown(KEYS.Down)    and 1 or 0),
             (UIS:IsKeyDown(KEYS.Backward) and 1 or 0) - (UIS:IsKeyDown(KEYS.Forward) and 1 or 0)
         )
-        if moveVec.Magnitude > 0 then
-            moveVec = moveVec.Unit * speed
-        end
+        if move.Magnitude > 0 then move = move.Unit * speed end
         local rotCF = CFrame.fromEulerAnglesYXZ(pitch, yaw, 0)
-        local targetVelocity = rotCF:VectorToWorldSpace(moveVec)
-        velocity = velocity:Lerp(targetVelocity, math.min(1, cfg.SmoothFactor / dt * 0.016))
-        local newPos = cam.CFrame.Position + velocity * dt
-        cam.CFrame = CFrame.new(newPos) * rotCF
+        local worldMove = rotCF:VectorToWorldSpace(move)
+        local alpha = 1 - math.exp(-cfg.SmoothFactor * dt)
+        velocity = velocity:Lerp(worldMove, alpha)
+        cam.CFrame = CFrame.new(cam.CFrame.Position + velocity * dt) * rotCF
     end)
-    DoNotif("Freecam: ENABLED  [WASD/QE move · Shift sprint · Scroll speed]", 3)
+    DoNotif("Freecam ON  —  WASD/QE · Shift sprint · Scroll speed", 3)
 end
 function Modules.Freecam:Disable()
     if not self.State.IsEnabled then return end
@@ -1578,8 +1578,8 @@ function Modules.Freecam:Disable()
     pcall(function()
         cam.CameraType = self.State.OriginalCameraType or Enum.CameraType.Custom
     end)
-    UIS.MouseBehavior    = Enum.MouseBehavior.Default
-    UIS.MouseIconEnabled = true
+    pcall(function() UIS.MouseBehavior    = Enum.MouseBehavior.Default end)
+    pcall(function() UIS.MouseIconEnabled = true end)
     local char = Players.LocalPlayer and Players.LocalPlayer.Character
     local hrp  = char and char:FindFirstChild("HumanoidRootPart")
     if hrp then
@@ -1591,22 +1591,32 @@ function Modules.Freecam:Disable()
     end
     self.State.Camera         = nil
     self.State.OriginalCFrame = nil
-    DoNotif("Freecam: DISABLED", 2)
+    DoNotif("Freecam OFF", 2)
 end
 function Modules.Freecam:Toggle()
-    if self.State.IsEnabled then
-        self:Disable()
-    else
-        self:Enable()
-    end
+    if self.State.IsEnabled then self:Disable() else self:Enable() end
 end
-RegisterCommand({
-    Name        = "freecam",
-    Aliases     = {},
-    Description = "Toggles freecam — detaches camera for free movement. WASD/QE to move, Shift to sprint, Scroll to adjust speed."
-}, function()
-    Modules.Freecam:Toggle()
-end)
+function Modules.Freecam:SetSpeed(n)
+    self.Config.BaseSpeed = math.clamp(tonumber(n) or 32, self.Config.SpeedMin, self.Config.SpeedMax)
+    DoNotif(("Freecam speed: %d"):format(self.Config.BaseSpeed), 2)
+end
+function Modules.Freecam:Initialize()
+    local module = self
+    RegisterCommand({
+        Name        = "freecam",
+        Aliases     = {"fc"},
+        Description = "Free camera — WASD/QE move, Shift sprint, Scroll/+- speed.",
+    }, function()
+        module:Toggle()
+    end)
+    RegisterCommand({
+        Name        = "fcspeed",
+        Aliases     = {"freecamspeed"},
+        Description = "Set freecam base speed. Usage: ;fcspeed <number>",
+    }, function(args)
+        module:SetSpeed(args[1])
+    end)
+end
 Modules.AstralProjection = {
     State = {
         isProjecting = false,
